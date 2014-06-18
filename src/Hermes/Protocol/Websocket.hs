@@ -6,17 +6,18 @@ module Hermes.Protocol.Websocket
   -- $parsing
     clientPacketParser
 
+  , verifyAuth
+
   ) where
 
-import           Control.Applicative        ((<$>), (<*>), (<|>))
+import           Control.Applicative        ((<$>), (<|>))
 import           Crypto.Hash                (SHA256, digestToHexByteString)
-import           Crypto.MAC                 (HMAC, hmac)
-import           Data.Attoparsec.ByteString (Parser)
+import           Crypto.MAC                 (HMAC (hmacGetDigest), hmac)
+import           Data.Attoparsec.ByteString (Parser, notInClass)
 import qualified Data.Attoparsec.ByteString as AB
 import           Data.Byteable              (constEqBytes)
 import           Data.ByteString            (ByteString)
-import           Data.Maybe                 (fromJust)
-import           Data.UUID                  (UUID, fromString, toASCIIBytes)
+import           Data.UUID                  (UUID, fromASCIIBytes, toASCIIBytes)
 
 type Version = Int
 type PingInterval = Int
@@ -24,7 +25,7 @@ type DeviceID = UUID
 type OldDeviceID = UUID
 type MessageID = UUID
 type SignedAuth = ByteString
-type ServiceName = String
+type ServiceName = ByteString
 
 data ClientPacket = Helo Version PingInterval
                   | NewAuth
@@ -52,7 +53,7 @@ heloParser :: Parser ClientPacket
 heloParser = do
   AB.string "HELO:v"
   version <- fromIntegral <$> AB.anyWord8
-  AB.char ':'
+  AB.string ":"
   ping <- fromIntegral <$> AB.anyWord8
   return $ Helo version ping
 
@@ -63,38 +64,52 @@ existingAuthParser :: Parser ClientPacket
 existingAuthParser = do
   AB.string "AUTH:"
   uuid <- parseUUID
-  AB.char ':'
+  AB.string ":"
   signed <- AB.takeByteString
   return $ ExistingAuth uuid signed
 
 parseUUID :: Parser UUID
-parseUUID = return $ fromJust . fromString <$> AB.take 36
+parseUUID = do
+  uuid <- fromASCIIBytes <$> AB.take 36
+  case uuid of
+    Just x -> return x
+    Nothing -> fail "Unable to parse UUID"
 
 pingParser :: Parser ClientPacket
 pingParser = AB.string "PING" >> return Ping
 
+takeNonColon :: Parser ByteString
+takeNonColon = AB.takeWhile (notInClass ":")
+
 deviceChangeParser :: Parser ClientPacket
 deviceChangeParser = do
   AB.string "DEVICECHANGE:"
-  serviceName <- AB.takeWhile (/= ':')
-  AB.char ':'
+  serviceName <- takeNonColon
+  AB.string ":"
   oldDevice <- parseUUID
-  AB.char ':'
-  oldKey <- AB.takeWhile (/= ':')
-  AB.char ':'
+  AB.string ":"
+  oldKey <- takeNonColon
+  AB.string ":"
   uuid <- parseUUID
   return $ DeviceChange serviceName oldDevice oldKey uuid
 
 outgoingParser :: Parser ClientPacket
 outgoingParser = do
   AB.string "OUT:"
-  serviceName <- AB.takeWhile (/= ':')
-  AB.char ':'
+  serviceName <- takeNonColon
+  AB.string ":"
   messageID <- parseUUID
-  AB.char ':'
+  AB.string ":"
   body <- AB.takeByteString
   return $ Outgoing serviceName messageID body
 
+computeHmac :: ByteString -> UUID -> ByteString
+computeHmac secret uuid = digestToHexByteString . hmacGetDigest $ (hmac secret (toASCIIBytes uuid) :: HMAC SHA256)
+
+compareHmac :: ByteString -> ByteString -> UUID -> Bool
+compareHmac secret hash uuid = constEqBytes hash $ computeHmac secret uuid
+
 verifyAuth :: ByteString -> ClientPacket -> Bool
-verifyAuth secret (ExistingAuth deviceId key) = constEqBytes computedHMAC key
-  where computedHMAC = digestToHexByteString (hmac secret (toASCIIBytes deviceId) :: HMAC SHA256)
+verifyAuth secret (ExistingAuth deviceId key) = compareHmac secret key deviceId
+verifyAuth secret (DeviceChange _ deviceId key _) = compareHmac secret key deviceId
+verifyAuth _ _ = False
