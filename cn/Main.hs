@@ -6,7 +6,7 @@ module Main
     main
   ) where
 
-import           Control.Applicative            ((<$>), (<*), (<*>), (<|>))
+import           Control.Applicative            ((<$>), (<*), (<*>))
 import           Control.Concurrent             (ThreadId, forkIO, myThreadId,
                                                  threadDelay, throwTo)
 import           Control.Concurrent.STM.TBQueue (TBQueue, writeTBQueue)
@@ -18,12 +18,9 @@ import           Control.Monad.STM              (STM, atomically)
 import qualified Data.Attoparsec.Text           as A
 import           Data.Map.Strict                (Map)
 import qualified Data.Map.Strict                as M
-import           Data.Maybe                     (fromJust)
 import           Data.Text                      (Text)
 import qualified Data.Text                      as T
 import           Data.Typeable                  (Typeable)
-import           Data.UUID                      (UUID, fromASCIIBytes,
-                                                 toASCIIBytes)
 import qualified Network.WebSockets             as WS
 import           System.Timeout                 (timeout)
 
@@ -38,9 +35,9 @@ data CNException = DuplicateClient
 instance Exception CNException
 
 type ClientData = (PingInterval, ThreadId, WS.Connection)
-type OutboundRouter = (ThreadId)
 type ClientMap = Map DeviceID ClientData
 type DeviceMessage = (DeviceID, ClientPacket)
+type OutboundRouter = (ThreadId)
 
 data InboundRelay = InboundRelay {
     tid    :: ThreadId
@@ -52,6 +49,15 @@ data ServerState = ServerState {
   , relays    :: TVar [InboundRelay]
   , routers   :: TVar [OutboundRouter]
   }
+
+nackDeviceMessage :: DeviceMessage -> ServerState -> IO ()
+nackDeviceMessage (deviceId, (Outgoing s mid _)) state = do
+  cdata <- atomically $ getClient deviceId state
+  case cdata of
+    Just (_, _, conn) ->
+      WS.sendTextData conn $ T.concat ["OUT:", s, ":", mid, ":NACK"]
+    _ -> return ()
+nackDeviceMessage _ _ = return ()
 
 echoStats :: ServerState -> IO ()
 echoStats state = forever $ do
@@ -114,7 +120,7 @@ checkAuth state conn ping = do
   msg <- readData conn (25*1000000)
   case msg of
     Just m -> process m (ping, myId, conn)
-    Nothing -> return ()
+    Nothing -> putStrLn "Time-out waiting for auth." >> return ()
 
   where
     process (Right NewAuth) cdata = do
@@ -128,14 +134,13 @@ checkAuth state conn ping = do
 
     process (Right auth@(ExistingAuth deviceID _)) cdata
       | W.verifyAuth "secret" auth = do
-        action <- atomically $ do
+        join . atomically $ do
           client <- getClient deviceID state
           addClient deviceID cdata state
           return $ case client of
             Just (_, cid, _) -> throwTo cid DuplicateClient
             _ -> return ()
         safeCleanup deviceID $ do
-          action
           WS.sendTextData conn ("AUTH:SUCCESS" :: Text)
           messagingApplication state deviceID cdata
       | otherwise = print auth >> WS.sendTextData conn ("AUTH:INVALID" :: Text)
@@ -152,8 +157,7 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
       join . atomically $ do
         rs <- readTVar $ relays state
         if null rs then do
-          return $ WS.sendTextData conn $ T.concat [
-            "OUT:", s, ":", mid, ":NACK"]
+          return $ nackDeviceMessage (uuid, packet) state
         else do
           writeTBQueue (inChan $ head rs) (uuid, packet)
           return $ return ()
