@@ -14,29 +14,28 @@ module Hermes.Protocol.Websocket
   -- * Packet Functions
 
   , newDeviceID
-  , deviceIdToText
   , signDeviceID
   , verifyAuth
 
   ) where
 
-import           Control.Applicative  ((*>), (<$>), (<|>))
+import           Control.Applicative  ((*>), (<|>))
 import           Crypto.Hash          (SHA256, digestToHexByteString)
 import           Crypto.MAC           (HMAC (hmacGetDigest), hmac)
 import           Data.Attoparsec.Text (Parser)
 import qualified Data.Attoparsec.Text as A
 import           Data.Byteable        (constEqBytes)
 import           Data.ByteString      (ByteString)
-import           Data.Text            (Text, pack)
+import           Data.Text            (Text)
 import           Data.Text.Encoding   (decodeUtf8, encodeUtf8)
-import           Data.UUID            (UUID, fromASCIIBytes, toASCIIBytes, toString)
+import           Data.UUID            (toASCIIBytes)
 import           Data.UUID.V4         (nextRandom)
 
 type Version = Int
 type PingInterval = Int
-type DeviceID = UUID
-type OldDeviceID = UUID
-type MessageID = UUID
+type DeviceID = Text
+type OldDeviceID = Text
+type MessageID = Text
 type DeviceIDHMAC = Text
 type ServiceName = Text
 
@@ -68,21 +67,14 @@ heloParser = do
 
 authParser :: Parser ClientPacket
 authParser = do
-  "AUTH:"
+  _ <- "AUTH:"
   existingAuthParser <|> return NewAuth
 
 existingAuthParser :: Parser ClientPacket
 existingAuthParser = do
-  uuid <- parseUUID
+  uuid <- takeNonColon
   signed <- ":" *> A.takeText
   return $ ExistingAuth uuid signed
-
-parseUUID :: Parser UUID
-parseUUID = do
-  uuid <- (fromASCIIBytes . encodeUtf8) <$> A.take 36
-  case uuid of
-    Just x -> return x
-    Nothing -> fail "Unable to parse UUID"
 
 pingParser :: Parser ClientPacket
 pingParser = "PING" >> return Ping
@@ -93,36 +85,33 @@ takeNonColon = A.takeWhile (/= ':')
 deviceChangeParser :: Parser ClientPacket
 deviceChangeParser = do
   serviceName <- "DEVICECHANGE:" *> takeNonColon
-  oldDevice <- ":" *> parseUUID
+  oldDevice <- ":" *> takeNonColon
   oldKey <- ":" *> takeNonColon
-  uuid <- ":" *> parseUUID
+  uuid <- ":" *> takeNonColon
   return $ DeviceChange serviceName oldDevice oldKey uuid
 
 outgoingParser :: Parser ClientPacket
 outgoingParser = do
   serviceName <- "OUT:" *> takeNonColon
-  messageID <- ":" *> parseUUID
+  messageID <- ":" *> takeNonColon
   body <- ":" *> A.takeText
   return $ Outgoing serviceName messageID body
 
-computeHmac :: ByteString -> UUID -> ByteString
-computeHmac secret uuid = digestToHexByteString . hmacGetDigest $ (hmac secret (toASCIIBytes uuid) :: HMAC SHA256)
+computeHmac :: ByteString -> ByteString -> ByteString
+computeHmac secret uuid = digestToHexByteString . hmacGetDigest $ (hmac secret uuid :: HMAC SHA256)
 
-compareHmac :: ByteString -> ByteString -> UUID -> Bool
+compareHmac :: ByteString -> ByteString -> ByteString -> Bool
 compareHmac secret hash uuid = constEqBytes hash $ computeHmac secret uuid
 
 verifyAuth :: Text -> ClientPacket -> Bool
-verifyAuth secret (ExistingAuth deviceId key) = compareHmac (encodeUtf8 secret) (encodeUtf8 key) deviceId
-verifyAuth secret (DeviceChange _ deviceId key _) = compareHmac (encodeUtf8 secret) (encodeUtf8 key) deviceId
+verifyAuth secret (ExistingAuth deviceId key) = compareHmac (encodeUtf8 secret) (encodeUtf8 key) (encodeUtf8 deviceId)
+verifyAuth secret (DeviceChange _ deviceId key _) = compareHmac (encodeUtf8 secret) (encodeUtf8 key) (encodeUtf8 deviceId)
 verifyAuth _ _ = False
 
 newDeviceID :: IO DeviceID
-newDeviceID = nextRandom
-
-deviceIdToText :: DeviceID -> Text
-deviceIdToText = pack . toString
+newDeviceID = nextRandom >>= return . decodeUtf8 . toASCIIBytes
 
 signDeviceID :: DeviceID -> Text -> Text
 signDeviceID uuid secret =
   decodeUtf8 $ digestToHexByteString . hmacGetDigest
-             $ (hmac (encodeUtf8 secret) (toASCIIBytes uuid) :: HMAC SHA256)
+             $ (hmac (encodeUtf8 secret) (encodeUtf8 uuid) :: HMAC SHA256)
