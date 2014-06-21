@@ -6,13 +6,14 @@ module Main
     main
   ) where
 
-import           Control.Applicative            ((<$>), (<*), (<*>))
-import           Control.Concurrent             (ThreadId, myThreadId, throwTo)
+import           Control.Applicative            ((<$>), (<*), (<*>), (<|>))
+import           Control.Concurrent             (ThreadId, forkIO, myThreadId,
+                                                 threadDelay, throwTo)
 import           Control.Concurrent.STM.TBQueue (TBQueue, writeTBQueue)
 import           Control.Concurrent.STM.TVar    (TVar, modifyTVar', newTVar,
                                                  readTVar)
 import           Control.Exception              (Exception, finally, throw)
-import           Control.Monad                  (forM_, forever)
+import           Control.Monad                  (forM_, forever, join)
 import           Control.Monad.STM              (STM, atomically)
 import qualified Data.Attoparsec.Text           as A
 import           Data.Map.Strict                (Map)
@@ -52,6 +53,12 @@ data ServerState = ServerState {
   , routers   :: TVar [OutboundRouter]
   }
 
+echoStats :: ServerState -> IO ()
+echoStats state = forever $ do
+  threadDelay $ 5 * 1000000
+  count <- atomically $ numClients state
+  putStrLn $ concat ["Client count: ", show count]
+
 newServerState :: STM ServerState
 newServerState = ServerState <$> newTVar M.empty
                              <*> newTVar []
@@ -78,11 +85,12 @@ getClient deviceId state = readClientMap state >>= return . (M.lookup deviceId)
 main :: IO ()
 main = do
   state <- atomically newServerState
+  _ <- forkIO $ echoStats state
   putStrLn "All started, launching socket server..."
   WS.runServer "0.0.0.0" 8080 $ application state
 
 parseMessage :: Text -> Either String W.ClientPacket
-parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput)
+parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . T.strip
 
 readData :: WS.Connection -> Int -> IO (Maybe (Either String ClientPacket))
 readData conn after = timeout after $ parseMessage <$> WS.receiveData conn
@@ -103,9 +111,10 @@ application state pending = do
 checkAuth :: ServerState -> WS.Connection -> PingInterval -> IO ()
 checkAuth state conn ping = do
   myId <- myThreadId
-  let cdata = (ping, myId, conn)
-  msg <- parseMessage <$> WS.receiveData conn
-  process msg cdata
+  msg <- readData conn (25*1000000)
+  case msg of
+    Just m -> process m (ping, myId, conn)
+    Nothing -> return ()
 
   where
     process (Right NewAuth) cdata = do
@@ -129,7 +138,7 @@ checkAuth state conn ping = do
           action
           WS.sendTextData conn ("AUTH:SUCCESS" :: Text)
           messagingApplication state deviceID cdata
-      | otherwise = WS.sendTextData conn ("AUTH:INVALID" :: Text)
+      | otherwise = print auth >> WS.sendTextData conn ("AUTH:INVALID" :: Text)
 
     process _ _ = WS.sendTextData conn ("AUTH:INVALID" :: Text)
     safeCleanup deviceId = flip finally $ atomically $ removeClient deviceId state
@@ -140,16 +149,14 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
   case pmsg of
     Just (Right packet@(Outgoing s mid _)) -> do
       print packet
-      action <- atomically $ do
+      join . atomically $ do
         rs <- readTVar $ relays state
-        if length rs == 0 then do
+        if null rs then do
           return $ WS.sendTextData conn $ T.concat [
             "OUT:", s, ":", mid, ":NACK"]
         else do
-          let relay = head rs
-          writeTBQueue (inChan relay) (uuid, packet)
+          writeTBQueue (inChan $ head rs) (uuid, packet)
           return $ return ()
-      action
     Just (Right Ping) -> WS.sendTextData conn ("PONG" :: Text)
     Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "++show x)
       >> throw BadDataRead
