@@ -146,6 +146,12 @@ checkAuth state conn ping = do
 
     process (Right auth@(ExistingAuth deviceID _)) cdata
       | W.verifyAuth "secret" auth = do
+
+        -- Atomically determine if this DeviceID already exists in the server
+        -- states client map. If it does, return an IO op that will kill the dupe
+        -- client. Either way we update the client map so that the DeviceID now points
+        -- to our current client data.
+        -- We return an IO op to run, since the STM can't run IO ops, ergo the 'join'.
         join . atomically $ do
           client <- getClient deviceID state
           addClient deviceID cdata state
@@ -158,7 +164,19 @@ checkAuth state conn ping = do
       | otherwise = print auth >> WS.sendTextData conn ("AUTH:INVALID" :: Text)
 
     process _ _ = WS.sendTextData conn ("AUTH:INVALID" :: Text)
-    safeCleanup deviceId = flip finally $ atomically $ removeClient deviceId state
+
+    -- Define a safe clean-up that ensures if the rest of this clients interaction goes
+    -- bad, we will ALWAYS remove this client from the client mapping. Note that we
+    -- have to check to ensure we don't delete this deviceId if the threadId doesn't match
+    -- our own threadId (ie, maybe we've been killed).
+    safeCleanup deviceId = flip finally $ do
+      myId <- myThreadId
+      atomically $ do
+        client <- getClient deviceId state
+        case client of
+          Nothing -> return ()
+          Just (_, cid, _) -> if myId == cid then removeClient deviceId state
+            else return ()
 
 -- Final transition to message send/receive mode. This runs until the client
 -- does something bad which will cause the connection to drop.
@@ -176,15 +194,16 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
 
       -- Run an STM atomic operation that reads the list of available relays and
       -- attempts to put the message on a bounded queue (tbqueue) of the first relay
-      -- available. If the queue is full, this blocks until either the relay list
-      -- is updated (relay is removed/added) or the queue has space. Otherwise drop
-      -- a NACK back to the client.
+      -- available. If no relay is available, we NACK the message. If the relay's
+      -- queue is full, this blocks until either the relay list is updated
+      -- (relay is removed/added) or the queue has space.
       join . atomically $ do
         rs <- readTVar $ relays state
         if null rs then do
           return $ nackDeviceMessage (uuid, packet) state
         else do
           writeTBQueue (inChan $ head rs) (uuid, packet)
+          -- Return a 'blank' IO op
           return $ return ()
 
     -- Handle the PING
