@@ -54,7 +54,8 @@ nackDeviceMessage :: DeviceMessage -> ServerState -> IO ()
 nackDeviceMessage (deviceId, (Outgoing s mid _)) state = do
   cdata <- atomically $ getClient deviceId state
   case cdata of
-    Just (_, _, conn) -> WS.sendTextData conn $ T.concat ["OUT:", s, ":", mid, ":NACK"]
+    Just (_, _, conn) -> WS.sendTextData conn $
+      T.concat ["OUT:", s, ":", mid, ":NACK"]
     _ -> return ()
 nackDeviceMessage _ _ = return ()
 
@@ -119,7 +120,8 @@ application state pending = do
   case msg of
     Right (Helo ver ping) ->
       if ver == 1
-        then WS.sendTextData conn ("HELO:v1" :: Text) >> checkAuth state conn (ping*1000000)
+        then WS.sendTextData conn ("HELO:v1" :: Text) >>
+          checkAuth state conn (ping*1000000)
         else return ()
     _ -> return ()
 
@@ -138,7 +140,8 @@ checkAuth state conn ping = do
       deviceID <- W.newDeviceID
       atomically $ addClient deviceID cdata state
       safeCleanup deviceID $ do
-        WS.sendTextData conn $ T.concat ["AUTH:NEW:", deviceID, ":", W.signDeviceID deviceID "secret"]
+        WS.sendTextData conn $ T.concat ["AUTH:NEW:", deviceID, ":",
+                                         W.signDeviceID deviceID "secret"]
         messagingApplication state deviceID cdata
 
     process (Right auth@(ExistingAuth deviceID _)) cdata
@@ -210,7 +213,8 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
     Just (Right Ping) -> WS.sendTextData conn ("PONG" :: Text)
 
     -- Drop the rest
-    Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "++show x)
-      >> throw BadDataRead
-    Just (Left err) -> putStrLn ("Unable to parse message: "++err) >> throw BadDataRead
+    Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "
+                        ++ show x) >> throw BadDataRead
+    Just (Left err) -> putStrLn ("Unable to parse message: "++err) >>
+                         throw BadDataRead
     _ -> throw BadDataRead
