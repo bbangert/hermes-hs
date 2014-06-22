@@ -174,10 +174,11 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
     Just (Right packet@(Outgoing s mid _)) -> do
       print packet
 
-      -- Run an STM atomic operation that reads our relays TVar and
-      -- attempts to put the message on a bounded queue (tbqueue) if there's
-      -- a relay there. If the queue is full, this blocks until either the
-      -- relay list is updated (relay is removed/added) or the queue has space.
+      -- Run an STM atomic operation that reads the list of available relays and
+      -- attempts to put the message on a bounded queue (tbqueue) of the first relay
+      -- available. If the queue is full, this blocks until either the relay list
+      -- is updated (relay is removed/added) or the queue has space. Otherwise drop
+      -- a NACK back to the client.
       join . atomically $ do
         rs <- readTVar $ relays state
         if null rs then do
