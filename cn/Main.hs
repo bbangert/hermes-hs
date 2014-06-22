@@ -65,6 +65,11 @@ echoStats state = forever $ do
   count <- atomically $ numClients state
   putStrLn $ concat ["Client count: ", show count]
 
+{- STM Convenience functions
+   These functions assist in accessing portions of the ServerState.
+
+-}
+
 newServerState :: STM ServerState
 newServerState = ServerState <$> newTVar M.empty
                              <*> newTVar []
@@ -88,6 +93,12 @@ removeClient deviceId state = modifyTVar' (clientMap state) $ M.delete deviceId
 getClient :: DeviceID -> ServerState -> STM (Maybe ClientData)
 getClient deviceId state = readClientMap state >>= return . (M.lookup deviceId)
 
+-- Read a message and enforce a timeout. The response will be in a Maybe
+-- indicating whether it timed out or not. If it didn't time out, then the
+-- Either will be an indication if the packet it found parsed or not.
+readData :: WS.Connection -> Int -> IO (Maybe (Either String ClientPacket))
+readData conn after = timeout after $ parseMessage <$> WS.receiveData conn
+
 main :: IO ()
 main = do
   state <- atomically newServerState
@@ -97,9 +108,6 @@ main = do
 
 parseMessage :: Text -> Either String W.ClientPacket
 parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . T.strip
-
-readData :: WS.Connection -> Int -> IO (Maybe (Either String ClientPacket))
-readData conn after = timeout after $ parseMessage <$> WS.receiveData conn
 
 -- We start our interaction with a new websocket here, to do the basic HELO
 -- exchange
