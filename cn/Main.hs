@@ -101,6 +101,8 @@ parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . T.strip
 readData :: WS.Connection -> Int -> IO (Maybe (Either String ClientPacket))
 readData conn after = timeout after $ parseMessage <$> WS.receiveData conn
 
+-- We start our interaction with a new websocket here, to do the basic HELO
+-- exchange
 application :: ServerState -> WS.ServerApp
 application state pending = do
   conn <- WS.acceptRequest pending
@@ -114,6 +116,8 @@ application state pending = do
       else return ()
     _ -> return ()
 
+-- Second state of a new websocket exchange, HELO worked, now its on to doing
+-- the AUTH before we transition to message sending/receiving mode
 checkAuth :: ServerState -> WS.Connection -> PingInterval -> IO ()
 checkAuth state conn ping = do
   myId <- myThreadId
@@ -148,9 +152,16 @@ checkAuth state conn ping = do
     process _ _ = WS.sendTextData conn ("AUTH:INVALID" :: Text)
     safeCleanup deviceId = flip finally $ atomically $ removeClient deviceId state
 
+-- Final transition to message send/receive mode. This runs until the client
+-- does something bad which will cause the connection to drop.
 messagingApplication :: ServerState -> DeviceID -> ClientData -> IO ()
 messagingApplication state uuid (ping, _, conn) = forever $ do
   pmsg <- readData conn ping
+
+  -- We have a nested case here of an Either inside a Maybe. The Maybe indicates
+  -- whether or not we timed out attempting to read data. The Either indicates if
+  -- the message parsed or not. We only accept Outgoing/Ping messages here, all else
+  -- results in dropping the connection.
   case pmsg of
     Just (Right packet@(Outgoing s mid _)) -> do
       print packet
@@ -167,7 +178,10 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
           writeTBQueue (inChan $ head rs) (uuid, packet)
           return $ return ()
 
+    -- Handle the PING
     Just (Right Ping) -> WS.sendTextData conn ("PONG" :: Text)
+
+    -- Drop the rest
     Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "++show x)
       >> throw BadDataRead
     Just (Left err) -> putStrLn ("Unable to parse message: "++err) >> throw BadDataRead
