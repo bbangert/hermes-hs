@@ -6,27 +6,30 @@ module Main
     main
   ) where
 
-import           Control.Applicative            ((<$>), (<*), (<*>))
-import           Control.Concurrent             (ThreadId, forkIO, myThreadId,
-                                                 threadDelay, throwTo)
-import           Control.Concurrent.STM.TBQueue (TBQueue, writeTBQueue)
-import           Control.Concurrent.STM.TVar    (TVar, modifyTVar', newTVar,
-                                                 readTVar)
-import           Control.Exception              (Exception, finally, throw)
-import           Control.Monad                  (forM_, forever, join)
-import           Control.Monad.STM              (STM, atomically)
-import qualified Data.Attoparsec.Text           as A
-import           Data.Map.Strict                (Map)
-import qualified Data.Map.Strict                as M
-import           Data.Text                      (Text)
-import qualified Data.Text                      as T
-import           Data.Typeable                  (Typeable)
-import qualified Network.WebSockets             as WS
-import           System.Timeout                 (timeout)
+import           Control.Applicative              ((<$>), (<*), (<*>), (<|>))
+import           Control.Concurrent               (ThreadId, forkIO, myThreadId,
+                                                   threadDelay, throwTo)
+import           Control.Concurrent.STM.TBQueue   (TBQueue, writeTBQueue)
+import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
+                                                   readTVar)
+import           Control.Exception                (Exception, finally, throw)
+import           Control.Monad                    (forM_, forever, join)
+import           Control.Monad.STM                (STM, atomically)
+import qualified Data.Attoparsec.ByteString       as A
+import qualified Data.Attoparsec.ByteString.Char8 as AC
+import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString                  as B
+import qualified Data.ByteString.Char8            as BC
+import           Data.Char                        (isSpace)
+import           Data.Map.Strict                  (Map)
+import qualified Data.Map.Strict                  as M
+import           Data.Typeable                    (Typeable)
+import qualified Network.WebSockets               as WS
+import           System.Timeout                   (timeout)
 
-import           Hermes.Protocol.Websocket      as W
-import           Hermes.Protocol.Websocket      (ClientPacket (..), DeviceID,
-                                                 PingInterval)
+import           Hermes.Protocol.Websocket        as W
+import           Hermes.Protocol.Websocket        (ClientPacket (..), DeviceID,
+                                                   PingInterval)
 
 data CNException = DuplicateClient
                  | BadDataRead
@@ -55,7 +58,7 @@ nackDeviceMessage (deviceId, (Outgoing s mid _)) state = do
   cdata <- atomically $ getClient deviceId state
   case cdata of
     Just (_, _, conn) -> WS.sendTextData conn $
-      T.concat ["OUT:", s, ":", mid, ":NACK"]
+      B.concat ["OUT:", s, ":", mid, ":NACK"]
     _ -> return ()
 nackDeviceMessage _ _ = return ()
 
@@ -106,8 +109,9 @@ main = do
   putStrLn "All started, launching socket server..."
   WS.runServer "0.0.0.0" 8080 $ application state
 
-parseMessage :: Text -> Either String W.ClientPacket
-parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . T.strip
+parseMessage :: ByteString -> Either String W.ClientPacket
+parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . dropTrailingNewline
+  where dropTrailingNewline b = if isSpace (BC.last b) then B.init b else b
 
 -- We start our interaction with a new websocket here, to do the basic HELO
 -- exchange
@@ -120,7 +124,7 @@ application state pending = do
   case msg of
     Right (Helo ver ping) ->
       if ver == 1
-        then WS.sendTextData conn ("HELO:v1" :: Text) >>
+        then WS.sendTextData conn ("HELO:v1" :: ByteString) >>
           checkAuth state conn (ping*1000000)
         else return ()
     _ -> return ()
@@ -140,7 +144,7 @@ checkAuth state conn ping = do
       deviceID <- W.newDeviceID
       atomically $ addClient deviceID cdata state
       safeCleanup deviceID $ do
-        WS.sendTextData conn $ T.concat ["AUTH:NEW:", deviceID, ":",
+        WS.sendTextData conn $ B.concat ["AUTH:NEW:", deviceID, ":",
                                          W.signDeviceID deviceID "secret"]
         messagingApplication state deviceID cdata
 
@@ -161,11 +165,11 @@ checkAuth state conn ping = do
             Just (_, cid, _) -> throwTo cid DuplicateClient
             _ -> return ()
         safeCleanup deviceID $ do
-          WS.sendTextData conn ("AUTH:SUCCESS" :: Text)
+          WS.sendTextData conn ("AUTH:SUCCESS" :: ByteString)
           messagingApplication state deviceID cdata
-      | otherwise = print auth >> WS.sendTextData conn ("AUTH:INVALID" :: Text)
+      | otherwise = print auth >> WS.sendTextData conn ("AUTH:INVALID" :: ByteString)
 
-    process _ _ = WS.sendTextData conn ("AUTH:INVALID" :: Text)
+    process _ _ = WS.sendTextData conn ("AUTH:INVALID" :: ByteString)
 
     -- Define a safe clean-up that ensures if the rest of this clients
     -- interaction goes bad, we will ALWAYS remove this client from the client
@@ -210,7 +214,7 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
           return $ return ()
 
     -- Handle the PING
-    Just (Right Ping) -> WS.sendTextData conn ("PONG" :: Text)
+    Just (Right Ping) -> WS.sendTextData conn ("PONG" :: ByteString)
 
     -- Drop the rest
     Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "

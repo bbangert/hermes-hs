@@ -20,6 +20,7 @@ Library
   Build-Depends:
       base        >= 4        && < 5
     , attoparsec  >= 0.12.1.0
+    , binary      >= 0.7.2.1
     , byteable    >= 0.1.1
     , bytestring  >= 0.10.4.0
     , cryptohash  >= 0.11.5
@@ -33,6 +34,7 @@ Executable cn
   Build-depends:
       base          >= 4.6      && < 5
     , attoparsec  >= 0.12.1.0
+    , bytestring  >= 0.10.4.0
     , containers    >= 0.5
     , hermes        >= 0.1
     , transformers  >= 0.3
@@ -40,3 +42,14 @@ Executable cn
     , text        >= 1.1
     , stm         >= 2.4.2
     , uuid          >= 1.3.3
+
+Executable wstester
+  Default-Language:     Haskell2010
+  Main-is:              wstester/Main.hs
+  GHC-Options:          -O2 -Wall -threaded -funfolding-use-threshold=16 -optc-O3
+  Build-depends:
+      base          >= 4.6      && < 5
+    , async         >= 2.0.1.4
+    , bytestring  >= 0.10.4.0
+    , containers    >= 0.5
+    , websockets    >= 0.8.2.4

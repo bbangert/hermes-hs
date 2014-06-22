@@ -19,38 +19,41 @@ module Hermes.Protocol.Websocket
 
   ) where
 
-import           Control.Applicative  ((*>), (<|>))
-import           Crypto.Hash          (SHA256, digestToHexByteString)
-import           Crypto.MAC           (HMAC (hmacGetDigest), hmac)
-import           Data.Attoparsec.Text (Parser)
-import qualified Data.Attoparsec.Text as A
-import           Data.Byteable        (constEqBytes)
-import           Data.ByteString      (ByteString)
-import           Data.Text            (Text)
-import           Data.Text.Encoding   (decodeUtf8, encodeUtf8)
-import           Data.UUID            (toASCIIBytes)
-import           Data.UUID.V4         (nextRandom)
+import           Control.Applicative              ((*>), (<|>))
+import           Crypto.Hash                      (SHA256,
+                                                   digestToHexByteString)
+import           Crypto.MAC                       (HMAC (hmacGetDigest), hmac)
+import           Data.Attoparsec.ByteString       (Parser)
+import qualified Data.Attoparsec.ByteString       as AB
+import qualified Data.Attoparsec.ByteString.Char8 as AC
+import           Data.Attoparsec.ByteString.Char8 (decimal)
+import           Data.Byteable                    (constEqBytes)
+import           Data.ByteString                  (ByteString)
+import           Data.UUID                        (toASCIIBytes)
+import           Data.UUID.V4                     (nextRandom)
 
 type Version = Int
 type PingInterval = Int
-type DeviceID = Text
-type OldDeviceID = Text
-type MessageID = Text
-type DeviceIDHMAC = Text
-type ServiceName = Text
+type DeviceID = ByteString
+type OldDeviceID = ByteString
+type MessageID = ByteString
+type DeviceIDHMAC = ByteString
+type ServiceName = ByteString
+type Body = ByteString
 
 data ClientPacket = Helo Version PingInterval
                   | NewAuth
                   | ExistingAuth DeviceID DeviceIDHMAC
                   | Ping
                   | DeviceChange ServiceName OldDeviceID DeviceIDHMAC DeviceID
-                  | Outgoing ServiceName MessageID Text
+                  | Outgoing ServiceName MessageID Body
                   deriving (Show, Eq)
 
 {- $parsing
    Parsing functions for turning a Websocket Text into a ClientPacket.
 
 -}
+
 clientPacketParser :: Parser ClientPacket
 clientPacketParser =
       heloParser
@@ -61,8 +64,8 @@ clientPacketParser =
 
 heloParser :: Parser ClientPacket
 heloParser = do
-  version <- "HELO:v" *> A.decimal
-  ping <- ":" *> A.decimal
+  version <- "HELO:v" *> decimal
+  ping <- ":" *> decimal
   return $ Helo version ping
 
 authParser :: Parser ClientPacket
@@ -73,14 +76,14 @@ authParser = do
 existingAuthParser :: Parser ClientPacket
 existingAuthParser = do
   uuid <- takeNonColon
-  signed <- ":" *> A.takeText
+  signed <- ":" *> AB.takeByteString
   return $ ExistingAuth uuid signed
 
 pingParser :: Parser ClientPacket
 pingParser = "PING" >> return Ping
 
-takeNonColon :: Parser Text
-takeNonColon = A.takeWhile (/= ':')
+takeNonColon :: Parser ByteString
+takeNonColon = AC.takeWhile (/= ':')
 
 deviceChangeParser :: Parser ClientPacket
 deviceChangeParser = do
@@ -94,7 +97,7 @@ outgoingParser :: Parser ClientPacket
 outgoingParser = do
   serviceName <- "OUT:" *> takeNonColon
   messageID <- ":" *> takeNonColon
-  body <- ":" *> A.takeText
+  body <- ":" *> AB.takeByteString
   return $ Outgoing serviceName messageID body
 
 computeHmac :: ByteString -> ByteString -> ByteString
@@ -103,15 +106,14 @@ computeHmac secret uuid = digestToHexByteString . hmacGetDigest $ (hmac secret u
 compareHmac :: ByteString -> ByteString -> ByteString -> Bool
 compareHmac secret hash uuid = constEqBytes hash $ computeHmac secret uuid
 
-verifyAuth :: Text -> ClientPacket -> Bool
-verifyAuth secret (ExistingAuth deviceId key) = compareHmac (encodeUtf8 secret) (encodeUtf8 key) (encodeUtf8 deviceId)
-verifyAuth secret (DeviceChange _ deviceId key _) = compareHmac (encodeUtf8 secret) (encodeUtf8 key) (encodeUtf8 deviceId)
+verifyAuth :: ByteString -> ClientPacket -> Bool
+verifyAuth secret (ExistingAuth deviceId key) = compareHmac secret key deviceId
+verifyAuth secret (DeviceChange _ deviceId key _) = compareHmac secret key deviceId
 verifyAuth _ _ = False
 
 newDeviceID :: IO DeviceID
-newDeviceID = nextRandom >>= return . decodeUtf8 . toASCIIBytes
+newDeviceID = nextRandom >>= return . toASCIIBytes
 
-signDeviceID :: DeviceID -> Text -> Text
+signDeviceID :: DeviceID -> ByteString -> ByteString
 signDeviceID uuid secret =
-  decodeUtf8 $ digestToHexByteString . hmacGetDigest
-             $ (hmac (encodeUtf8 secret) (encodeUtf8 uuid) :: HMAC SHA256)
+  digestToHexByteString . hmacGetDigest $ (hmac secret uuid :: HMAC SHA256)
