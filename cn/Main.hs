@@ -154,6 +154,11 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
   case pmsg of
     Just (Right packet@(Outgoing s mid _)) -> do
       print packet
+
+      -- Run an STM atomic operation that reads our relays TVar and
+      -- attempts to put the message on a bounded queue (tbqueue) if there's
+      -- a relay there. If the queue is full, this blocks until either the
+      -- relay list is updated (relay is removed/added) or the queue has space.
       join . atomically $ do
         rs <- readTVar $ relays state
         if null rs then do
@@ -161,6 +166,7 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
         else do
           writeTBQueue (inChan $ head rs) (uuid, packet)
           return $ return ()
+
     Just (Right Ping) -> WS.sendTextData conn ("PONG" :: Text)
     Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "++show x)
       >> throw BadDataRead
