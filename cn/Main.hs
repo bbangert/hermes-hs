@@ -189,14 +189,14 @@ checkAuth state conn ping = do
 -- does something bad which will cause the connection to drop.
 messagingApplication :: ServerState -> DeviceID -> ClientData -> IO ()
 messagingApplication state uuid (ping, _, conn) = forever $ do
-  pmsg <- parseMessage <$> WS.receiveData conn
+  pmsg <- readData conn ping
 
   -- We have a nested case here of an Either inside a Maybe. The Maybe
   -- indicates whether or not we timed out attempting to read data. The Either
   -- indicates if the message parsed or not. We only accept Outgoing/Ping
   -- messages here, all else results in dropping the connection.
   case pmsg of
-    Right packet@(Outgoing s mid _) -> do
+    Just (Right packet@(Outgoing s mid _)) -> do
       print packet
 
       -- Run an STM atomic operation that reads the list of available relays
@@ -214,11 +214,11 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
           return $ return ()
 
     -- Handle the PING
-    Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
+    Just (Right Ping) -> WS.sendTextData conn ("PONG" :: ByteString)
 
     -- Drop the rest
-    Right x -> putStrLn ("Unexpected packet, dropping connection: "
+    Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "
                         ++ show x) >> throw BadDataRead
-    Left err -> putStrLn ("Unable to parse message: "++err) >>
+    Just (Left err) -> putStrLn ("Unable to parse message: "++err) >>
                          throw BadDataRead
     _ -> throw BadDataRead
