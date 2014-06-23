@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main
   (
@@ -24,8 +25,13 @@ import           Data.Char                        (isSpace)
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as M
 import           Data.Typeable                    (Typeable)
+import qualified Network.Wai
+import qualified Network.Wai.Application.Static   as Static
+import qualified Network.Wai.Handler.Warp         as Warp
+import qualified Network.Wai.Handler.WebSockets   as WaiWS
 import qualified Network.WebSockets               as WS
 import           System.Timeout                   (timeout)
+import Data.FileEmbed (embedDir)
 
 import           Hermes.Protocol.Websocket        as W
 import           Hermes.Protocol.Websocket        (ClientPacket (..), DeviceID,
@@ -107,7 +113,13 @@ main = do
   state <- atomically newServerState
   _ <- forkIO $ echoStats state
   putStrLn "All started, launching socket server..."
-  WS.runServer "0.0.0.0" 8080 $ application state
+  Warp.runSettings Warp.defaultSettings
+    { Warp.settingsPort = 8080
+    } $ WaiWS.websocketsOr WS.defaultConnectionOptions (application state) staticApp
+  --WS.runServer "0.0.0.0" 8080 $ application state
+
+staticApp :: Network.Wai.Application
+staticApp = Static.staticApp $ Static.embeddedSettings $(embedDir "static")
 
 parseMessage :: ByteString -> Either String W.ClientPacket
 parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . dropTrailingNewline
