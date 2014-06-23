@@ -1,34 +1,36 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
-import           Control.Concurrent       (ThreadId, threadDelay, forkIO)
+import           Control.Concurrent       (ThreadId, forkIO, threadDelay)
 import           Control.Concurrent.Async (Async, async, waitCatch)
 import           Control.Monad            (forever, mapM, replicateM)
 import           Data.ByteString          (ByteString)
+import           Data.ByteString.Char8    as BC
 import qualified Network.WebSockets       as WS
+import           System.Environment       (getArgs)
 
 main :: IO ()
 main = do
-  results <- replicateM 5000 startWs
-  threadDelay (20*1000000)
-  print results
+  [ip, port, spawnCount] <- getArgs
+  results <- replicateM (read spawnCount) (startWs ip $ read port)
+  threadDelay (2000*1000000)
   return ()
 
-startWs :: IO ThreadId
-startWs = forkIO $ WS.runClientWith "localhost" 8080 "/" WS.defaultConnectionOptions
-                                    [("Origin", "localhost:8080")] wstester
+startWs :: String -> Int -> IO ThreadId
+startWs host port = forkIO $ WS.runClientWith host port "/" WS.defaultConnectionOptions
+                              [("Origin", BC.concat [BC.pack host, ":", BC.pack $ show port])] wstester
 
 wstester :: WS.ClientApp ()
 wstester conn = do
-  WS.sendTextData conn ("HELO:v1:10" :: ByteString)
+  WS.sendTextData conn ("HELO:v1:20" :: ByteString)
   (_ :: ByteString) <- WS.receiveData conn
   WS.sendTextData conn ("AUTH:" :: ByteString)
   (_ :: ByteString) <- WS.receiveData conn
-  replicateM 5 $ do
+  forever $ do
     WS.sendTextData conn ("PING" :: ByteString)
     (_ :: ByteString) <- WS.receiveData conn
-    threadDelay (2*1000000)
+    threadDelay (15*1000000)
   print "Dropping connection"
   return ()
