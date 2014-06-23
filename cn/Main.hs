@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell    #-}
 
 module Main
   (
@@ -22,6 +22,7 @@ import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Char8            as BC
 import           Data.Char                        (isSpace)
+import           Data.FileEmbed                   (embedDir)
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as M
 import           Data.Typeable                    (Typeable)
@@ -31,7 +32,6 @@ import qualified Network.Wai.Handler.Warp         as Warp
 import qualified Network.Wai.Handler.WebSockets   as WaiWS
 import qualified Network.WebSockets               as WS
 import           System.Timeout                   (timeout)
-import Data.FileEmbed (embedDir)
 
 import           Hermes.Protocol.Websocket        as W
 import           Hermes.Protocol.Websocket        (ClientPacket (..), DeviceID,
