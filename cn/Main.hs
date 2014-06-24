@@ -13,7 +13,8 @@ import           Control.Concurrent               (ThreadId, forkIO, myThreadId,
 import           Control.Concurrent.STM.TBQueue   (TBQueue, writeTBQueue)
 import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
-import           Control.Exception                (Exception, finally, throw)
+import           Control.Exception                (Exception, catch, finally,
+                                                   throw)
 import           Control.Monad                    (forM_, forever, join)
 import           Control.Monad.STM                (STM, atomically)
 import qualified Data.Attoparsec.ByteString       as A
@@ -116,7 +117,6 @@ main = do
   Warp.runSettings Warp.defaultSettings
     { Warp.settingsPort = 8080
     } $ WaiWS.websocketsOr WS.defaultConnectionOptions (application state) staticApp
-  --WS.runServer "0.0.0.0" 8080 $ application state
 
 staticApp :: Network.Wai.Application
 staticApp = Static.staticApp $ Static.embeddedSettings $(embedDir "static")
@@ -130,9 +130,9 @@ parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . dropTrailing
 application :: ServerState -> WS.ServerApp
 application state pending = do
   conn <- WS.acceptRequest pending
-  putStrLn "Accepted connection."
+  -- putStrLn "Accepted connection."
   msg <- parseMessage <$> WS.receiveData conn
-  putStrLn (show msg)
+  -- putStrLn (show msg)
   case msg of
     Right (Helo ver ping) ->
       if ver == 1
