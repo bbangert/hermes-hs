@@ -61,6 +61,7 @@ Executable wstester
     , bytestring  >= 0.10.4.0
     , containers    >= 0.5
     , websockets    >= 0.8.2.4
+    , io-streams
 
 Executable simpleserver
   Default-Language:     Haskell2010
