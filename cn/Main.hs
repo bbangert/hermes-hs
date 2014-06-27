@@ -125,23 +125,20 @@ inputCommands state req respond = do
       let did = encodeUtf8 devid
       msg <- join . atomically $ do
         c <- getClient did state
-        case c of
-          Nothing        -> return $ return "No such device id"
-          Just (_, tid, _) -> return $ do
-            throwTo tid BadDataRead
-            return "Kill sent"
+        return $ case c of
+          Just (_, tid, _) -> throwTo tid BadDataRead >> return "Kill sent"
+          Nothing          -> return "No such device id"
       respond $ NW.responseLBS status200 [] msg
     ("send":devid:service:[]) -> do
       let did = encodeUtf8 devid
       msg <- join . atomically $ do
         c <- getClient did state
-        case c of
-          Nothing       -> return $ return "No such device id"
-          Just (_, _, conn) -> return $ do
-            body <- NW.requestBody req
-            WS.sendTextData conn $ B.concat ["OUT:", encodeUtf8 service, ":",
-                                             body]
-            return "Sent data"
+        case c of Nothing           -> return $ return "No such device id"
+                  Just (_, _, conn) -> return $ do
+                    body <- NW.requestBody req
+                    WS.sendTextData conn $ B.concat
+                      ["OUT:", encodeUtf8 service, ":", body]
+                    return "Sent data"
       respond $ NW.responseLBS status200 [] msg
     _ -> respond $ NW.responseLBS status404 [] ""
 
