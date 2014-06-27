@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE TemplateHaskell    #-}
 
 module Main
   (
@@ -23,11 +22,12 @@ import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Char8            as BC
 import           Data.Char                        (isSpace)
-import           Data.FileEmbed                   (embedDir)
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as M
+import Data.Text.Encoding (encodeUtf8)
 import           Data.Typeable                    (Typeable)
-import qualified Network.Wai
+import           Network.HTTP.Types.Status        (status200, status404)
+import qualified Network.Wai                      as NW
 import qualified Network.Wai.Application.Static   as Static
 import qualified Network.Wai.Handler.Warp         as Warp
 import qualified Network.Wai.Handler.WebSockets   as WaiWS
@@ -116,10 +116,34 @@ main = do
   putStrLn "All started, launching socket server..."
   Warp.runSettings Warp.defaultSettings
     { Warp.settingsPort = 8080
-    } $ WaiWS.websocketsOr WS.defaultConnectionOptions (application state) staticApp
+    } $ WaiWS.websocketsOr WS.defaultConnectionOptions (application state) $ inputCommands state
 
-staticApp :: Network.Wai.Application
-staticApp = Static.staticApp $ Static.embeddedSettings $(embedDir "static")
+inputCommands :: ServerState -> NW.Application
+inputCommands state req respond = do
+  case NW.pathInfo req of
+    ("drop":devid:[]) -> do
+      let did = encodeUtf8 devid
+      msg <- join . atomically $ do
+        c <- getClient did state
+        case c of
+          Nothing        -> return $ return "No such device id"
+          Just (_, tid, _) -> return $ do
+            throwTo tid BadDataRead
+            return "Kill sent"
+      respond $ NW.responseLBS status200 [] msg
+    ("send":devid:service:[]) -> do
+      let did = encodeUtf8 devid
+      msg <- join . atomically $ do
+        c <- getClient did state
+        case c of
+          Nothing       -> return $ return "No such device id"
+          Just (_, _, conn) -> return $ do
+            body <- NW.requestBody req
+            WS.sendTextData conn $ B.concat ["OUT:", encodeUtf8 service, ":",
+                                             body]
+            return "Sent data"
+      respond $ NW.responseLBS status200 [] msg
+    _ -> respond $ NW.responseLBS status404 [] ""
 
 parseMessage :: ByteString -> Either String W.ClientPacket
 parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . dropTrailingNewline
