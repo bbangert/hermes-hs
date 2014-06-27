@@ -137,7 +137,7 @@ inputCommands state req respond = do
                   Just (_, _, conn) -> return $ do
                     body <- NW.requestBody req
                     WS.sendTextData conn $ B.concat
-                      ["OUT:", encodeUtf8 service, ":", body]
+                      ["INC:", encodeUtf8 service, ":", body]
                     return "Sent data"
       respond $ NW.responseLBS status200 [] msg
     _ -> respond $ NW.responseLBS status404 [] ""
