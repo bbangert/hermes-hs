@@ -38,6 +38,7 @@ Executable cn
     , containers      >= 0.5
     , file-embed      >= 0.0.7
     , hermes          >= 0.1
+    , http-types
     , transformers    >= 0.3
     , websockets      >= 0.8.2.4
     , text            >= 1.1
