@@ -1,42 +1,44 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main
   (
     main
   ) where
 
-import           Control.Applicative              ((<$>), (<*), (<*>), (<|>))
+import           Control.Applicative              ((<$>), (<*))
 import           Control.Concurrent               (ThreadId, forkIO, myThreadId,
                                                    threadDelay, throwTo)
 import           Control.Concurrent.STM.TBQueue   (TBQueue, writeTBQueue)
 import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
-import           Control.Exception                (Exception, catch, finally,
-                                                   throw)
-import           Control.Monad                    (forM_, forever, join)
+import           Control.Exception                (Exception, Handler (..),
+                                                   catches, finally)
+import           Control.Monad                    (forever, join, void)
 import           Control.Monad.STM                (STM, atomically)
 import qualified Data.Attoparsec.ByteString       as A
-import qualified Data.Attoparsec.ByteString.Char8 as AC
 import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Char8            as BC
 import           Data.Char                        (isSpace)
+import qualified Data.IORef                       as I
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as M
 import           Data.Text.Encoding               (encodeUtf8)
+import qualified Data.Time.Clock.POSIX            as P
 import           Data.Typeable                    (Typeable)
 import           Network.HTTP.Types.Status        (status200, status404)
 import qualified Network.Wai                      as NW
-import qualified Network.Wai.Application.Static   as Static
 import qualified Network.Wai.Handler.Warp         as Warp
+import qualified Network.Wai.Handler.Warp.Timeout as WT
 import qualified Network.Wai.Handler.WebSockets   as WaiWS
 import qualified Network.WebSockets               as WS
-import           System.Timeout                   (timeout)
+import           System.IO.Streams.Attoparsec     (ParseException)
 
-import           Hermes.Protocol.Websocket        as W
 import           Hermes.Protocol.Websocket        (ClientPacket (..), DeviceID,
                                                    PingInterval)
+import qualified Hermes.Protocol.Websocket        as W
 
 data CNException = DuplicateClient
                  | BadDataRead
@@ -50,14 +52,15 @@ type DeviceMessage = (DeviceID, ClientPacket)
 type OutboundRouter = (ThreadId)
 
 data InboundRelay = InboundRelay {
-    tid    :: ThreadId
-  , inChan :: TBQueue DeviceMessage
+    inThreadId :: ThreadId
+  , inChan     :: TBQueue DeviceMessage
   }
 
 data ServerState = ServerState {
     clientMap :: TVar ClientMap
   , relays    :: TVar [InboundRelay]
   , routers   :: TVar [OutboundRouter]
+  , toManager :: WT.Manager
   }
 
 nackDeviceMessage :: DeviceMessage -> ServerState -> IO ()
@@ -80,10 +83,14 @@ echoStats state = forever $ do
 
 -}
 
-newServerState :: STM ServerState
-newServerState = ServerState <$> newTVar M.empty
-                             <*> newTVar []
-                             <*> newTVar []
+-- Create the new server state, we make a timeout manager that runs every half
+-- second for timeout operations
+newServerState :: WT.Manager -> STM ServerState
+newServerState manager = do
+  cm <- newTVar M.empty
+  inbrs <- newTVar []
+  ors <- newTVar []
+  return $ ServerState cm inbrs ors manager
 
 readClientMap :: ServerState -> STM ClientMap
 readClientMap = readTVar . clientMap
@@ -103,21 +110,58 @@ removeClient deviceId state = modifyTVar' (clientMap state) $ M.delete deviceId
 getClient :: DeviceID -> ServerState -> STM (Maybe ClientData)
 getClient deviceId state = readClientMap state >>= return . (M.lookup deviceId)
 
+-- Custom timer that uses our timeout thread to run an IO operation with a timer
+-- of a certain interval in seconds
+withTimeout :: ServerState -> Int -> IO a -> IO a
+withTimeout state delta action = do
+  myId <- myThreadId
+
+  -- Our ioRef that indicates whether we should actually kill with the timeout
+  reReg <- I.newIORef True
+
+  startTime <- P.getPOSIXTime
+  let end = startTime + (fromRational $ toRational delta)
+
+  void $ WT.register manager $ timeOutAction startTime end reReg myId
+  result <- action
+  I.atomicWriteIORef reReg False
+  return result
+  where
+    manager = toManager state
+    -- The timeout function that re-registers itself until canceled by
+    -- changing the reg IORef, or it eventually kills us
+    timeOutAction cur end reg tId = do
+      shouldRun <- I.readIORef reg
+      case shouldRun of
+        True -> do
+          let cur' = cur + 0.5
+          if cur' > end then
+            throwTo tId WT.TimeoutThread
+          else
+            void $ WT.register manager $ timeOutAction cur' end reg tId
+        False -> return ()
+
 -- Read a message and enforce a timeout. The response will be in a Maybe
 -- indicating whether it timed out or not. If it didn't time out, then the
 -- Either will be an indication if the packet it found parsed or not.
-readData :: WS.Connection -> Int -> IO (Maybe (Either String ClientPacket))
-readData conn after = timeout after $ parseMessage <$> WS.receiveData conn
+readData :: WS.Connection -> ServerState -> Int -> IO (Either String ClientPacket)
+readData conn state after = withTimeout state after $ parseMessage <$> WS.receiveData conn
 
 main :: IO ()
 main = do
-  state <- atomically newServerState
+  manager <- WT.initialize (500*1000)
+  state <- atomically $ newServerState manager
   _ <- forkIO $ echoStats state
   putStrLn "All started, launching socket server..."
   Warp.runSettings Warp.defaultSettings
     { Warp.settingsPort = 8080
     } $ WaiWS.websocketsOr WS.defaultConnectionOptions (application state) $ inputCommands state
 
+-- Our HTTP command handler for testing
+-- This accepts:
+--     /drop/DEVICEID
+--     /send/DEVICEID/SERVICENAME
+--             { some HTTP POST/PUT body }
 inputCommands :: ServerState -> NW.Application
 inputCommands state req respond = do
   case NW.pathInfo req of
@@ -146,19 +190,29 @@ parseMessage :: ByteString -> Either String W.ClientPacket
 parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . dropTrailingNewline
   where dropTrailingNewline b = if isSpace (BC.last b) then B.init b else b
 
+-- Swallow up bad reads
+badReadHandler :: Handler ()
+badReadHandler = Handler $ \(_ :: CNException) -> return ()
+
+-- Don't care about parse errors either
+parseHandler :: Handler ()
+parseHandler = Handler $ \(_ :: ParseException) -> return ()
+
 -- We start our interaction with a new websocket here, to do the basic HELO
 -- exchange
 application :: ServerState -> WS.ServerApp
 application state pending = do
   conn <- WS.acceptRequest pending
-  -- putStrLn "Accepted connection."
+  catches (checkHelo state conn) [badReadHandler, parseHandler]
+
+checkHelo :: ServerState -> WS.Connection -> IO ()
+checkHelo state conn = do
   msg <- parseMessage <$> WS.receiveData conn
-  -- putStrLn (show msg)
   case msg of
     Right (Helo ver ping) ->
       if ver == 1
         then WS.sendTextData conn ("HELO:v1" :: ByteString) >>
-          checkAuth state conn (ping*1000000)
+          checkAuth state conn ping
         else return ()
     _ -> return ()
 
@@ -167,10 +221,7 @@ application state pending = do
 checkAuth :: ServerState -> WS.Connection -> PingInterval -> IO ()
 checkAuth state conn ping = do
   myId <- myThreadId
-  msg <- readData conn (25*1000000)
-  case msg of
-    Just m -> process m (ping, myId, conn)
-    Nothing -> putStrLn "Time-out waiting for auth." >> return ()
+  readData conn state 25 >>= flip process (ping, myId, conn)
 
   where
     process (Right NewAuth) cdata = do
@@ -222,14 +273,14 @@ checkAuth state conn ping = do
 -- does something bad which will cause the connection to drop.
 messagingApplication :: ServerState -> DeviceID -> ClientData -> IO ()
 messagingApplication state uuid (ping, _, conn) = forever $ do
-  pmsg <- readData conn ping
+  pmsg <- readData conn state ping
 
   -- We have a nested case here of an Either inside a Maybe. The Maybe
   -- indicates whether or not we timed out attempting to read data. The Either
   -- indicates if the message parsed or not. We only accept Outgoing/Ping
   -- messages here, all else results in dropping the connection.
   case pmsg of
-    Just (Right packet@(Outgoing s mid _)) -> do
+    Right packet@(Outgoing _ _ _) -> do
       print packet
 
       -- Run an STM atomic operation that reads the list of available relays
@@ -247,11 +298,9 @@ messagingApplication state uuid (ping, _, conn) = forever $ do
           return $ return ()
 
     -- Handle the PING
-    Just (Right Ping) -> WS.sendTextData conn ("PONG" :: ByteString)
+    Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
 
     -- Drop the rest
-    Just (Right x) -> putStrLn ("Unexpected packet, dropping connection: "
-                        ++ show x) >> throw BadDataRead
-    Just (Left err) -> putStrLn ("Unable to parse message: "++err) >>
-                         throw BadDataRead
-    _ -> throw BadDataRead
+    Right x -> putStrLn ("Unexpected packet, dropping connection: "
+                        ++ show x) >> return ()
+    Left err -> putStrLn ("Unable to parse message: "++err) >> return ()
