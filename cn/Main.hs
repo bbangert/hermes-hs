@@ -24,7 +24,7 @@ import qualified Data.ByteString.Char8            as BC
 import           Data.Char                        (isSpace)
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as M
-import Data.Text.Encoding (encodeUtf8)
+import           Data.Text.Encoding               (encodeUtf8)
 import           Data.Typeable                    (Typeable)
 import           Network.HTTP.Types.Status        (status200, status404)
 import qualified Network.Wai                      as NW
