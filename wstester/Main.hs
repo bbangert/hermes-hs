@@ -52,10 +52,16 @@ wstester ping count conn = do
   (_ :: ByteString) <- WS.receiveData conn
   WS.sendTextData conn ("AUTH:" :: ByteString)
   (_ :: ByteString) <- WS.receiveData conn
-  atomicModifyIORef' count (\x -> (x+1, ()))
-  finally pingConnection $ void $ atomicModifyIORef' count (\x -> (x-1, ()))
+  incRef count
+  finally pingConnection (decRef count)
   where
     pingConnection = forever $ do
       WS.sendTextData conn ("PING" :: ByteString)
       (_ :: ByteString) <- WS.receiveData conn
       threadDelay (round $ ping*1000000)
+
+incRef :: Num a => IORef a -> IO ()
+incRef ref = void $ atomicModifyIORef' ref (\x -> (x+1, ()))
+
+decRef :: Num a => IORef a -> IO ()
+decRef ref = void $ atomicModifyIORef' ref (\x -> (x-1, ()))
