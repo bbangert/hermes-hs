@@ -273,7 +273,6 @@ messagingApplication state uuid (ping, _, conn) =
                3. NACK's the message if no channel has space, otherwise accepts
 
              If the list of relays changes, this operation will restart.
-
           -}
           join . atomically $ do
             rs <- readTVar $ relays state
@@ -282,7 +281,10 @@ messagingApplication state uuid (ping, _, conn) =
             else do
               let chanList = map inChan rs
                   tryWrite = flip T.tryWriteTBChan (uuid, packet)
+
+              -- Attempt to write the message to every channel in the list
               success <- anyM tryWrite chanList
+
               return $ if success then
                 -- Return a 'blank' IO op
                 return ()
