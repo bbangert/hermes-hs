@@ -163,9 +163,12 @@ parseHandler = Handler $ \(_ :: ParseException) -> return ()
 timeoutHandler :: Handler ()
 timeoutHandler = Handler $ \(_ :: WT.TimeoutThread) -> return ()
 
+-- Our set of basic errors we prefer to suppress, as they occur naturally with
+-- connections coming and going
 defaultErrors :: [Handler ()]
 defaultErrors = [badReadHandler, parseHandler, timeoutHandler]
 
+-- Run an IO computation with a Timeout Handle active, then pause it after
 withBTimeout :: WT.Handle -> IO a -> IO a
 withBTimeout h action = bracket_ (WT.resume h) (WT.pause h) action
 
@@ -178,6 +181,8 @@ application state pending = do
   conn <- withBTimeout h $ WS.acceptRequest pending
   catches (checkHelo state h conn) defaultErrors
 
+-- First state of a new connection, ensure our HELO statements match and
+-- remember the desired max ping interval
 checkHelo :: ServerState -> WT.Handle -> WS.Connection -> IO ()
 checkHelo state h conn = do
   msg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
