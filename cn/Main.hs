@@ -10,7 +10,6 @@ module Main
 import           Control.Applicative              ((<$>), (<*))
 import           Control.Concurrent               (ThreadId, forkIO, myThreadId,
                                                    threadDelay, throwTo)
-import           Control.Concurrent.STM.TBQueue   (TBQueue, writeTBQueue)
 import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
 import           Control.Exception                (Exception, Handler (..),
@@ -32,6 +31,7 @@ import qualified Network.Wai.Handler.Warp         as Warp
 import qualified Network.Wai.Handler.Warp.Timeout as WT
 import qualified Network.Wai.Handler.WebSockets   as WaiWS
 import qualified Network.WebSockets               as WS
+import qualified Control.Concurrent.STM.TBChan as T
 import           System.IO.Streams.Attoparsec     (ParseException)
 
 import           Hermes.Protocol.Websocket        (ClientPacket (..), DeviceID,
@@ -51,7 +51,7 @@ type OutboundRouter = (ThreadId)
 
 data InboundRelay = InboundRelay {
     inThreadId :: ThreadId
-  , inChan     :: TBQueue DeviceMessage
+  , inChan     :: T.TBChan DeviceMessage
   }
 
 data ServerState = ServerState {
@@ -276,9 +276,13 @@ messagingApplication state uuid (ping, _, conn) =
             if null rs then do
               return $ nackDeviceMessage (uuid, packet) state
             else do
-              writeTBQueue (inChan $ head rs) (uuid, packet)
-              -- Return a 'blank' IO op
-              return $ return ()
+              success <- T.tryWriteTBChan (inChan $ head rs) (uuid, packet)
+              if success then
+                -- Return a 'blank' IO op
+                return $ return ()
+              else
+                -- Channel is full and we're backlogged
+                return $ nackDeviceMessage (uuid, packet) state
 
         -- Handle the PING
         Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
