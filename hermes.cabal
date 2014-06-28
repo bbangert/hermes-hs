@@ -40,6 +40,7 @@ Executable cn
     , hermes          >= 0.1
     , io-streams
     , http-types
+    , monad-loops     >= 0.4.2.1
     , time
     , transformers    >= 0.3
     , websockets      >= 0.8.2.4

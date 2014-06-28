@@ -10,11 +10,13 @@ module Main
 import           Control.Applicative              ((<$>), (<*))
 import           Control.Concurrent               (ThreadId, forkIO, myThreadId,
                                                    threadDelay, throwTo)
+import qualified Control.Concurrent.STM.TBChan    as T
 import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
 import           Control.Exception                (Exception, Handler (..),
                                                    bracket_, catches, finally)
 import           Control.Monad                    (forever, join)
+import           Control.Monad.Loops              (anyM)
 import           Control.Monad.STM                (STM, atomically)
 import qualified Data.Attoparsec.ByteString       as A
 import           Data.ByteString                  (ByteString)
@@ -31,7 +33,6 @@ import qualified Network.Wai.Handler.Warp         as Warp
 import qualified Network.Wai.Handler.Warp.Timeout as WT
 import qualified Network.Wai.Handler.WebSockets   as WaiWS
 import qualified Network.WebSockets               as WS
-import qualified Control.Concurrent.STM.TBChan as T
 import           System.IO.Streams.Attoparsec     (ParseException)
 
 import           Hermes.Protocol.Websocket        (ClientPacket (..), DeviceID,
@@ -266,23 +267,28 @@ messagingApplication state uuid (ping, _, conn) =
         Right packet@(Outgoing _ _ _) -> do
           print packet
 
-          -- Run an STM atomic operation that reads the list of available relays
-          -- and attempts to put the message on a bounded queue (tbqueue) of the
-          -- first relay available. If no relay is available, we NACK the message.
-          -- If the relay's queue is full, this blocks until either the relay list
-          -- is updated (relay is removed/added) or the queue has space.
+          {- Run an STM atomic operation that:
+               1. Reads the list of relays into rs
+               2. Attempts to write the message into the first relay's input
+               3. NACK's the message if no channel has space, otherwise accepts
+
+             If the list of relays changes, this operation will restart.
+
+          -}
           join . atomically $ do
             rs <- readTVar $ relays state
             if null rs then do
               return $ nackDeviceMessage (uuid, packet) state
             else do
-              success <- T.tryWriteTBChan (inChan $ head rs) (uuid, packet)
-              if success then
+              let chanList = map inChan rs
+                  tryWrite = flip T.tryWriteTBChan (uuid, packet)
+              success <- anyM tryWrite chanList
+              return $ if success then
                 -- Return a 'blank' IO op
-                return $ return ()
+                return ()
               else
-                -- Channel is full and we're backlogged
-                return $ nackDeviceMessage (uuid, packet) state
+                -- Channels are full and we're backlogged
+                nackDeviceMessage (uuid, packet) state
 
         -- Handle the PING
         Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
