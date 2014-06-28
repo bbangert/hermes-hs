@@ -14,19 +14,17 @@ import           Control.Concurrent.STM.TBQueue   (TBQueue, writeTBQueue)
 import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
 import           Control.Exception                (Exception, Handler (..),
-                                                   catches, finally)
-import           Control.Monad                    (forever, join, void)
+                                                   bracket_, catches, finally)
+import           Control.Monad                    (forever, join)
 import           Control.Monad.STM                (STM, atomically)
 import qualified Data.Attoparsec.ByteString       as A
 import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as B
 import qualified Data.ByteString.Char8            as BC
 import           Data.Char                        (isSpace)
-import qualified Data.IORef                       as I
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as M
 import           Data.Text.Encoding               (encodeUtf8)
-import qualified Data.Time.Clock.POSIX            as P
 import           Data.Typeable                    (Typeable)
 import           Network.HTTP.Types.Status        (status200, status404)
 import qualified Network.Wai                      as NW
@@ -110,46 +108,9 @@ removeClient deviceId state = modifyTVar' (clientMap state) $ M.delete deviceId
 getClient :: DeviceID -> ServerState -> STM (Maybe ClientData)
 getClient deviceId state = readClientMap state >>= return . (M.lookup deviceId)
 
--- Custom timer that uses our timeout thread to run an IO operation with a timer
--- of a certain interval in seconds
-withTimeout :: ServerState -> Int -> IO a -> IO a
-withTimeout state delta action = do
-  myId <- myThreadId
-
-  -- Our ioRef that indicates whether we should actually kill with the timeout
-  reReg <- I.newIORef True
-
-  startTime <- P.getPOSIXTime
-  let end = startTime + (fromRational $ toRational delta)
-
-  void $ WT.register manager $ timeOutAction startTime end reReg myId
-  result <- action
-  I.atomicWriteIORef reReg False
-  return result
-  where
-    manager = toManager state
-    -- The timeout function that re-registers itself until canceled by
-    -- changing the reg IORef, or it eventually kills us
-    timeOutAction cur end reg tId = do
-      shouldRun <- I.readIORef reg
-      case shouldRun of
-        True -> do
-          let cur' = cur + 0.5
-          if cur' > end then
-            throwTo tId WT.TimeoutThread
-          else
-            void $ WT.register manager $ timeOutAction cur' end reg tId
-        False -> return ()
-
--- Read a message and enforce a timeout. The response will be in a Maybe
--- indicating whether it timed out or not. If it didn't time out, then the
--- Either will be an indication if the packet it found parsed or not.
-readData :: WS.Connection -> ServerState -> Int -> IO (Either String ClientPacket)
-readData conn state after = withTimeout state after $ parseMessage <$> WS.receiveData conn
-
 main :: IO ()
 main = do
-  manager <- WT.initialize (500*1000)
+  manager <- WT.initialize 1000000
   state <- atomically $ newServerState manager
   _ <- forkIO $ echoStats state
   putStrLn "All started, launching socket server..."
@@ -190,38 +151,51 @@ parseMessage :: ByteString -> Either String W.ClientPacket
 parseMessage = A.parseOnly (W.clientPacketParser <* A.endOfInput) . dropTrailingNewline
   where dropTrailingNewline b = if isSpace (BC.last b) then B.init b else b
 
--- Swallow up bad reads
+-- Swallow up our own errors
 badReadHandler :: Handler ()
 badReadHandler = Handler $ \(_ :: CNException) -> return ()
 
--- Don't care about parse errors either
+-- Don't care about parse errors
 parseHandler :: Handler ()
 parseHandler = Handler $ \(_ :: ParseException) -> return ()
+
+-- Ignore timeout errors
+timeoutHandler :: Handler ()
+timeoutHandler = Handler $ \(_ :: WT.TimeoutThread) -> return ()
+
+defaultErrors :: [Handler ()]
+defaultErrors = [badReadHandler, parseHandler, timeoutHandler]
+
+withBTimeout :: WT.Handle -> IO a -> IO a
+withBTimeout h action = bracket_ (WT.resume h) (WT.pause h) action
 
 -- We start our interaction with a new websocket here, to do the basic HELO
 -- exchange
 application :: ServerState -> WS.ServerApp
 application state pending = do
-  conn <- WS.acceptRequest pending
-  catches (checkHelo state conn) [badReadHandler, parseHandler]
+  h <- WT.registerKillThread (toManager state)
+  WT.pause h
+  conn <- withBTimeout h $ WS.acceptRequest pending
+  catches (checkHelo state h conn) defaultErrors
 
-checkHelo :: ServerState -> WS.Connection -> IO ()
-checkHelo state conn = do
-  msg <- parseMessage <$> WS.receiveData conn
+checkHelo :: ServerState -> WT.Handle -> WS.Connection -> IO ()
+checkHelo state h conn = do
+  msg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
   case msg of
     Right (Helo ver ping) ->
       if ver == 1
         then WS.sendTextData conn ("HELO:v1" :: ByteString) >>
-          checkAuth state conn ping
+          checkAuth state h conn ping
         else return ()
     _ -> return ()
 
 -- Second state of a new websocket exchange, HELO worked, now its on to doing
 -- the AUTH before we transition to message sending/receiving mode
-checkAuth :: ServerState -> WS.Connection -> PingInterval -> IO ()
-checkAuth state conn ping = do
+checkAuth :: ServerState -> WT.Handle -> WS.Connection -> PingInterval -> IO ()
+checkAuth state h conn ping = do
   myId <- myThreadId
-  readData conn state 25 >>= flip process (ping, myId, conn)
+  msg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
+  process msg (ping, myId, conn)
 
   where
     process (Right NewAuth) cdata = do
@@ -272,35 +246,39 @@ checkAuth state conn ping = do
 -- Final transition to message send/receive mode. This runs until the client
 -- does something bad which will cause the connection to drop.
 messagingApplication :: ServerState -> DeviceID -> ClientData -> IO ()
-messagingApplication state uuid (ping, _, conn) = forever $ do
-  pmsg <- readData conn state ping
+messagingApplication state uuid (ping, _, conn) =
+  WT.withManager (ping * 1000000) $ \tm -> do
+    h <- WT.registerKillThread tm
+    WT.pause h
+    forever $ do
+      pmsg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
 
-  -- We have a nested case here of an Either inside a Maybe. The Maybe
-  -- indicates whether or not we timed out attempting to read data. The Either
-  -- indicates if the message parsed or not. We only accept Outgoing/Ping
-  -- messages here, all else results in dropping the connection.
-  case pmsg of
-    Right packet@(Outgoing _ _ _) -> do
-      print packet
+      -- We have a nested case here of an Either inside a Maybe. The Maybe
+      -- indicates whether or not we timed out attempting to read data. The Either
+      -- indicates if the message parsed or not. We only accept Outgoing/Ping
+      -- messages here, all else results in dropping the connection.
+      case pmsg of
+        Right packet@(Outgoing _ _ _) -> do
+          print packet
 
-      -- Run an STM atomic operation that reads the list of available relays
-      -- and attempts to put the message on a bounded queue (tbqueue) of the
-      -- first relay available. If no relay is available, we NACK the message.
-      -- If the relay's queue is full, this blocks until either the relay list
-      -- is updated (relay is removed/added) or the queue has space.
-      join . atomically $ do
-        rs <- readTVar $ relays state
-        if null rs then do
-          return $ nackDeviceMessage (uuid, packet) state
-        else do
-          writeTBQueue (inChan $ head rs) (uuid, packet)
-          -- Return a 'blank' IO op
-          return $ return ()
+          -- Run an STM atomic operation that reads the list of available relays
+          -- and attempts to put the message on a bounded queue (tbqueue) of the
+          -- first relay available. If no relay is available, we NACK the message.
+          -- If the relay's queue is full, this blocks until either the relay list
+          -- is updated (relay is removed/added) or the queue has space.
+          join . atomically $ do
+            rs <- readTVar $ relays state
+            if null rs then do
+              return $ nackDeviceMessage (uuid, packet) state
+            else do
+              writeTBQueue (inChan $ head rs) (uuid, packet)
+              -- Return a 'blank' IO op
+              return $ return ()
 
-    -- Handle the PING
-    Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
+        -- Handle the PING
+        Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
 
-    -- Drop the rest
-    Right x -> putStrLn ("Unexpected packet, dropping connection: "
-                        ++ show x) >> return ()
-    Left err -> putStrLn ("Unable to parse message: "++err) >> return ()
+        -- Drop the rest
+        Right x -> putStrLn ("Unexpected packet, dropping connection: "
+                            ++ show x) >> return ()
+        Left err -> putStrLn ("Unable to parse message: "++err) >> return ()
