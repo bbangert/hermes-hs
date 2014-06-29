@@ -15,7 +15,8 @@ import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
 import           Control.Exception                (Exception, Handler (..),
                                                    bracket_, catches, finally)
-import           Control.Monad                    (forever, join)
+import           Control.Monad                    (forever, join, unless, void,
+                                                   when)
 import           Control.Monad.Loops              (anyM)
 import           Control.Monad.STM                (STM, atomically)
 import qualified Data.Attoparsec.ByteString       as A
@@ -63,7 +64,7 @@ data ServerState = ServerState {
   }
 
 nackDeviceMessage :: DeviceMessage -> ServerState -> IO ()
-nackDeviceMessage (deviceId, (Outgoing s mid _)) state = do
+nackDeviceMessage (deviceId, Outgoing s mid _) state = do
   cdata <- atomically $ getClient deviceId state
   case cdata of
     Just (_, _, conn) -> WS.sendTextData conn $
@@ -75,7 +76,7 @@ echoStats :: ServerState -> IO ()
 echoStats state = forever $ do
   threadDelay $ 5 * 1000000
   count <- atomically $ numClients state
-  putStrLn $ concat ["Client count: ", show count]
+  putStrLn $ "Client count: " ++ show count
 
 {- STM Convenience functions
    These functions assist in accessing portions of the ServerState.
@@ -95,10 +96,10 @@ readClientMap :: ServerState -> STM ClientMap
 readClientMap = readTVar . clientMap
 
 numClients :: ServerState -> STM Int
-numClients state = readClientMap state >>= return . M.size
+numClients state = M.size <$> readClientMap state
 
 clientExists :: DeviceID -> ServerState -> STM Bool
-clientExists d state = readClientMap state >>= return . (M.member d)
+clientExists d state = M.member d <$> readClientMap state
 
 addClient :: DeviceID -> ClientData -> ServerState -> STM ()
 addClient deviceId c state = modifyTVar' (clientMap state) $ M.insert deviceId c
@@ -107,7 +108,7 @@ removeClient :: DeviceID -> ServerState -> STM ()
 removeClient deviceId state = modifyTVar' (clientMap state) $ M.delete deviceId
 
 getClient :: DeviceID -> ServerState -> STM (Maybe ClientData)
-getClient deviceId state = readClientMap state >>= return . (M.lookup deviceId)
+getClient deviceId state = M.lookup deviceId <$> readClientMap state
 
 main :: IO ()
 main = do
@@ -125,8 +126,7 @@ main = do
 --     /send/DEVICEID/SERVICENAME
 --             { some HTTP POST/PUT body }
 inputCommands :: ServerState -> NW.Application
-inputCommands state req respond = do
-  case NW.pathInfo req of
+inputCommands state req respond = case NW.pathInfo req of
     ("drop":devid:[]) -> do
       let did = encodeUtf8 devid
       msg <- join . atomically $ do
@@ -171,7 +171,7 @@ defaultErrors = [badReadHandler, parseHandler, timeoutHandler]
 
 -- Run an IO computation with a Timeout Handle active, then pause it after
 withBTimeout :: WT.Handle -> IO a -> IO a
-withBTimeout h action = bracket_ (WT.resume h) (WT.pause h) action
+withBTimeout h = bracket_ (WT.resume h) (WT.pause h)
 
 -- We start our interaction with a new websocket here, to do the basic HELO
 -- exchange
@@ -179,8 +179,9 @@ application :: ServerState -> WS.ServerApp
 application state pending = do
   h <- WT.registerKillThread (toManager state)
   WT.pause h
-  conn <- withBTimeout h $ WS.acceptRequest pending
-  catches (checkHelo state h conn) defaultErrors
+  flip catches defaultErrors $ do
+    conn <- withBTimeout h $ WS.acceptRequest pending
+    checkHelo state h conn
 
 -- First state of a new connection, ensure our HELO statements match and
 -- remember the desired max ping interval
@@ -188,11 +189,8 @@ checkHelo :: ServerState -> WT.Handle -> WS.Connection -> IO ()
 checkHelo state h conn = do
   msg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
   case msg of
-    Right (Helo ver ping) ->
-      if ver == 1
-        then WS.sendTextData conn ("HELO:v1" :: ByteString) >>
-          checkAuth state h conn ping
-        else return ()
+    Right (Helo ver ping) -> when (ver == 1) $
+      WS.sendTextData conn ("HELO:v1" :: ByteString) >> checkAuth state h conn ping
     _ -> return ()
 
 -- Second state of a new websocket exchange, HELO worked, now its on to doing
@@ -246,8 +244,7 @@ checkAuth state h conn ping = do
         client <- getClient deviceId state
         case client of
           Nothing -> return ()
-          Just (_, cid, _) -> if myId == cid then removeClient deviceId state
-            else return ()
+          Just (_, cid, _) -> when (myId == cid) $ removeClient deviceId state
 
 -- Final transition to message send/receive mode. This runs until the client
 -- does something bad which will cause the connection to drop.
@@ -264,9 +261,7 @@ messagingApplication state uuid (ping, _, conn) =
       -- indicates if the message parsed or not. We only accept Outgoing/Ping
       -- messages here, all else results in dropping the connection.
       case pmsg of
-        Right packet@(Outgoing _ _ _) -> do
-          print packet
-
+        Right packet@(Outgoing{}) ->
           {- Run an STM atomic operation that:
                1. Reads the list of relays into rs
                2. Attempts to write the message into the first relay's input
@@ -276,7 +271,7 @@ messagingApplication state uuid (ping, _, conn) =
           -}
           join . atomically $ do
             rs <- readTVar $ relays state
-            if null rs then do
+            if null rs then
               return $ nackDeviceMessage (uuid, packet) state
             else do
               let chanList = map inChan rs
@@ -285,17 +280,12 @@ messagingApplication state uuid (ping, _, conn) =
               -- Attempt to write the message to every channel in the list
               success <- anyM tryWrite chanList
 
-              return $ if success then
-                -- Return a 'blank' IO op
-                return ()
-              else
-                -- Channels are full and we're backlogged
-                nackDeviceMessage (uuid, packet) state
+              -- Unless we delivered it, nack the message
+              return $ unless success $ nackDeviceMessage (uuid, packet) state
 
         -- Handle the PING
         Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
 
         -- Drop the rest
-        Right x -> putStrLn ("Unexpected packet, dropping connection: "
-                            ++ show x) >> return ()
-        Left err -> putStrLn ("Unable to parse message: "++err) >> return ()
+        Right x -> void $ putStrLn ("Unexpected packet, dropping connection: " ++ show x)
+        Left err -> void $ putStrLn ("Unable to parse message: "++err)
