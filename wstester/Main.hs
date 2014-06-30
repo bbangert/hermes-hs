@@ -40,11 +40,12 @@ main = do
   return ()
 
 startWs :: String -> Int -> Float -> IORef Int -> IO ThreadId
-startWs host port pingFreq count =
-  forkIO $ catches spawn [parseHandler, closedHandler, resetHandler]
-  where spawn = WS.runClientWith host port "/" WS.defaultConnectionOptions
-                  [("Origin", BC.concat [BC.pack host, ":", BC.pack $ show port])]
-                  $ wstester pingFreq count
+startWs host port pingFreq count = forkIO $ catches spawn errorHandlers
+  where 
+    errorHandlers = [parseHandler, closedHandler, resetHandler]
+    spawn = WS.runClientWith host port "/" WS.defaultConnectionOptions
+              [("Origin", BC.concat [BC.pack host, ":", BC.pack $ show port])]
+              $ wstester pingFreq count
 
 wstester :: Float -> IORef Int -> WS.ClientApp ()
 wstester ping count conn = do
