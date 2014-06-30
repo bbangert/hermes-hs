@@ -199,6 +199,10 @@ checkAuth :: ServerState -> WT.Handle -> WS.Connection -> PingInterval -> IO ()
 checkAuth state h conn ping = do
   myId <- myThreadId
   msg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
+
+  -- Don't need this handle anymore
+  WT.cancel h
+
   process msg (ping, myId, conn)
 
   where
@@ -253,7 +257,7 @@ messagingApplication state uuid (ping, _, conn) =
   WT.withManager (ping * 1000000) $ \tm -> do
     h <- WT.registerKillThread tm
     WT.pause h
-    forever $ do
+    flip finally (WT.cancel h >> WT.stopManager tm) $ forever $ do
       pmsg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
 
       -- We have a nested case here of an Either inside a Maybe. The Maybe
@@ -277,7 +281,7 @@ messagingApplication state uuid (ping, _, conn) =
               let chanList = map inChan rs
                   tryWrite = flip T.tryWriteTBChan (uuid, packet)
 
-              -- Attempt to write the message to every channel in the list
+              -- Attempt to write the message to one of the channels in the list
               success <- anyM tryWrite chanList
 
               -- Unless we delivered it, nack the message
