@@ -70,6 +70,12 @@ nackDeviceMessage (deviceId, Outgoing s mid _) state = do
     Just (_, _, conn) -> WS.sendTextData conn $
       B.concat ["OUT:", s, ":", mid, ":NACK"]
     _ -> return ()
+nackDeviceMessage (deviceId, DeviceChange s _ _ _) state = do
+  cdata <- atomically $ getClient deviceId state
+  case cdata of
+    Just (_, _, conn) -> WS.sendTextData conn $
+      B.concat ["DEVICECHANGE", s, ":NACK"]
+    _ -> return ()
 nackDeviceMessage _ _ = return ()
 
 echoStats :: ServerState -> IO ()
@@ -265,27 +271,13 @@ messagingApplication state uuid (ping, _, conn) =
       -- indicates if the message parsed or not. We only accept Outgoing/Ping
       -- messages here, all else results in dropping the connection.
       case pmsg of
-        Right packet@(Outgoing{}) ->
-          {- Run an STM atomic operation that:
-               1. Reads the list of relays into rs
-               2. Attempts to write the message into the first relay's input
-               3. NACK's the message if no channel has space, otherwise accepts
+        Right packet@(Outgoing{}) -> attemptMessageDelivery (uuid, packet)
 
-             If the list of relays changes, this operation will restart.
-          -}
-          join . atomically $ do
-            rs <- readTVar $ relays state
-            if null rs then
-              return $ nackDeviceMessage (uuid, packet) state
-            else do
-              let chanList = map inChan rs
-                  tryWrite = flip T.tryWriteTBChan (uuid, packet)
-
-              -- Attempt to write the message to one of the channels in the list
-              success <- anyM tryWrite chanList
-
-              -- Unless we delivered it, nack the message
-              return $ unless success $ nackDeviceMessage (uuid, packet) state
+        -- Handle DeviceChange
+        Right packet@(DeviceChange sn _ _ _) ->
+          if W.verifyAuth "secret" packet
+            then attemptMessageDelivery (uuid, packet)
+            else WS.sendTextData conn $ B.concat ["DEVICECHANGE", sn, ":INVALID"]
 
         -- Handle the PING
         Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
@@ -293,3 +285,25 @@ messagingApplication state uuid (ping, _, conn) =
         -- Drop the rest
         Right x -> void $ putStrLn ("Unexpected packet, dropping connection: " ++ show x)
         Left err -> void $ putStrLn ("Unable to parse message: "++err)
+  where
+    attemptMessageDelivery msg =
+      {- Run an STM atomic operation that:
+           1. Reads the list of relays into rs
+           2. Attempts to write the message into the first relay's input
+           3. NACK's the message if no channel has space, otherwise accepts
+
+         If the list of relays changes, this operation will restart.
+      -}
+      join . atomically $ do
+        rs <- readTVar $ relays state
+        if null rs then
+          return $ nackDeviceMessage msg state
+        else do
+          let chanList = map inChan rs
+              tryWrite = flip T.tryWriteTBChan msg
+
+          -- Attempt to write the message to one of the channels in the list
+          success <- anyM tryWrite chanList
+
+          -- Unless we delivered it, nack the message
+          return $ unless success $ nackDeviceMessage msg state
