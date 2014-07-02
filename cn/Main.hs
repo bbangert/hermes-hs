@@ -185,6 +185,20 @@ withTimeout tick = bracket (WT.initialize $ tick * 1000000) WT.stopManager
 withBTimeout :: WT.Handle -> IO a -> IO a
 withBTimeout h = bracket_ (WT.resume h) (WT.pause h)
 
+-- Define a safe clean-up that ensures if the rest of this clients
+-- interaction goes bad, we will ALWAYS remove this client from the client
+-- mapping. Note that we have to check to ensure we don't delete this
+-- deviceId if the threadId doesn't match our own threadId (ie, maybe we've
+-- been killed, and the client has already reconnected).
+safeCleanup :: ServerState -> DeviceID -> IO a -> IO a
+safeCleanup state deviceId = flip finally $ do
+  myId <- myThreadId
+  atomically $ do
+    client <- getClient deviceId state
+    case client of
+      Nothing -> return ()
+      Just (_, cid, _) -> when (myId == cid) $ removeClient deviceId state
+
 -- We start our interaction with a new websocket here, to do the basic HELO
 -- exchange
 application :: ServerState -> WS.ServerApp
@@ -221,7 +235,7 @@ checkAuth state h conn ping = do
     process (Right NewAuth) cdata = do
       deviceID <- W.newDeviceID
       atomically $ addClient deviceID cdata state
-      safeCleanup deviceID $ do
+      safeCleanup state deviceID $ do
         WS.sendTextData conn $ B.concat ["AUTH:NEW:", deviceID, ":",
                                          W.signDeviceID deviceID "secret"]
         messagingApplication state deviceID cdata
@@ -242,25 +256,12 @@ checkAuth state h conn ping = do
           return $ case client of
             Just (_, cid, _) -> throwTo cid DuplicateClient
             _ -> return ()
-        safeCleanup deviceID $ do
+        safeCleanup state deviceID $ do
           WS.sendTextData conn ("AUTH:SUCCESS" :: ByteString)
           messagingApplication state deviceID cdata
       | otherwise = print auth >> WS.sendTextData conn ("AUTH:INVALID" :: ByteString)
 
     process _ _ = WS.sendTextData conn ("AUTH:INVALID" :: ByteString)
-
-    -- Define a safe clean-up that ensures if the rest of this clients
-    -- interaction goes bad, we will ALWAYS remove this client from the client
-    -- mapping. Note that we have to check to ensure we don't delete this
-    -- deviceId if the threadId doesn't match our own threadId (ie, maybe we've
-    -- been killed).
-    safeCleanup deviceId = flip finally $ do
-      myId <- myThreadId
-      atomically $ do
-        client <- getClient deviceId state
-        case client of
-          Nothing -> return ()
-          Just (_, cid, _) -> when (myId == cid) $ removeClient deviceId state
 
 -- Final transition to message send/receive mode. This runs until the client
 -- does something bad which will cause the connection to drop.
