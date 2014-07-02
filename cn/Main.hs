@@ -14,7 +14,8 @@ import qualified Control.Concurrent.STM.TBChan    as T
 import           Control.Concurrent.STM.TVar      (TVar, modifyTVar', newTVar,
                                                    readTVar)
 import           Control.Exception                (Exception, Handler (..),
-                                                   bracket_, catches, finally)
+                                                   bracket, bracket_, catches,
+                                                   finally)
 import           Control.Monad                    (forever, join, unless, void,
                                                    when)
 import           Control.Monad.Loops              (anyM)
@@ -175,6 +176,11 @@ timeoutHandler = Handler $ \(_ :: WT.TimeoutThread) -> return ()
 defaultErrors :: [Handler ()]
 defaultErrors = [badReadHandler, parseHandler, timeoutHandler]
 
+-- Run an IO computation with a timeout manager ticking for the supplied amount
+-- of seconds, and stop the mananger after
+withTimeout :: Int -> (WT.Manager -> IO a) -> IO a
+withTimeout tick = bracket (WT.initialize $ tick * 1000000) WT.stopManager
+
 -- Run an IO computation with a Timeout Handle active, then pause it after
 withBTimeout :: WT.Handle -> IO a -> IO a
 withBTimeout h = bracket_ (WT.resume h) (WT.pause h)
@@ -259,30 +265,29 @@ checkAuth state h conn ping = do
 -- Final transition to message send/receive mode. This runs until the client
 -- does something bad which will cause the connection to drop.
 messagingApplication :: ServerState -> DeviceID -> ClientData -> IO ()
-messagingApplication state uuid (ping, _, conn) =
-  WT.withManager (ping * 1000000) $ \tm -> do
-    h <- WT.registerKillThread tm
-    WT.pause h
-    flip finally (WT.cancel h >> WT.stopManager tm) $ forever $ do
-      pmsg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
+messagingApplication state uuid (ping, _, conn) = withTimeout ping $ \tm -> do
+  h <- WT.registerKillThread tm
+  WT.pause h
+  flip finally (WT.cancel h >> WT.stopManager tm) $ forever $ do
+    pmsg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
 
-      -- We only accept Outgoing/Ping/DeviceChange messages here, all else results
-      -- in dropping the connection.
-      case pmsg of
-        Right packet@(Outgoing{}) -> attemptMessageDelivery (uuid, packet)
+    -- We only accept Outgoing/Ping/DeviceChange messages here, all else results
+    -- in dropping the connection.
+    case pmsg of
+      Right packet@(Outgoing{}) -> attemptMessageDelivery (uuid, packet)
 
-        -- Handle DeviceChange
-        Right packet@(DeviceChange sn _ _ _) ->
-          if W.verifyAuth "secret" packet
-            then attemptMessageDelivery (uuid, packet)
-            else WS.sendTextData conn $ B.concat ["DEVICECHANGE", sn, ":INVALID"]
+      -- Handle DeviceChange
+      Right packet@(DeviceChange sn _ _ _) ->
+        if W.verifyAuth "secret" packet
+          then attemptMessageDelivery (uuid, packet)
+          else WS.sendTextData conn $ B.concat ["DEVICECHANGE", sn, ":INVALID"]
 
-        -- Handle the PING
-        Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
+      -- Handle the PING
+      Right Ping -> WS.sendTextData conn ("PONG" :: ByteString)
 
-        -- Drop the rest
-        Right x -> void $ putStrLn ("Unexpected packet, dropping connection: " ++ show x)
-        Left err -> void $ putStrLn ("Unable to parse message: "++err)
+      -- Drop the rest
+      Right x -> void $ putStrLn ("Unexpected packet, dropping connection: " ++ show x)
+      Left err -> void $ putStrLn ("Unable to parse message: "++err)
   where
     attemptMessageDelivery msg =
       {- Run an STM atomic operation that:
