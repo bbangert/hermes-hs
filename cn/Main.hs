@@ -266,10 +266,8 @@ messagingApplication state uuid (ping, _, conn) =
     flip finally (WT.cancel h >> WT.stopManager tm) $ forever $ do
       pmsg <- withBTimeout h $ parseMessage <$> WS.receiveData conn
 
-      -- We have a nested case here of an Either inside a Maybe. The Maybe
-      -- indicates whether or not we timed out attempting to read data. The Either
-      -- indicates if the message parsed or not. We only accept Outgoing/Ping
-      -- messages here, all else results in dropping the connection.
+      -- We only accept Outgoing/Ping/DeviceChange messages here, all else results
+      -- in dropping the connection.
       case pmsg of
         Right packet@(Outgoing{}) -> attemptMessageDelivery (uuid, packet)
 
