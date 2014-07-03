@@ -29,8 +29,12 @@ Library
 
 Executable cn
   Default-Language:     Haskell2010
-  Main-is:              cn/Main.hs
-  GHC-Options:          -Wall -threaded
+  HS-Source-Dirs:       hermes-cn
+  Main-is:              Main.hs
+  GHC-Options:          -Wall -Werror -threaded
+  Other-Modules:
+    Hermes.ConnectionNode.Types
+    Hermes.ConnectionNode.WebSocketServer
   Build-depends:
       base            >= 4.6      && < 5
     , attoparsec      >= 0.12.1.0
