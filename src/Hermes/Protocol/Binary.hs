@@ -1,9 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Hermes.Protocol.Binary
-  (
+    (
+      -- * Binary Packets
+      RelayClientPacket (..)
+    , RelayServerPacket (..)
 
-  ) where
+    ) where
 
 import           Control.Applicative   ((<$>), (<*>))
 import           Control.Monad         (liftM2)
@@ -37,53 +40,64 @@ data RelayServerPacket = ISHelo Version MaxMessages
      deriving (Show)
 
 instance Binary RelayClientPacket where
-  put (ICHelo ver) = do put (1 :: Word16)
-                        put (fromIntegral ver :: Word16)
-  put (ICDeliver mid did sn body) = do put (2 :: Word16)
-                                       putMessageId mid
-                                       putDeviceId did
-                                       putBytestring sn
-                                       putBytestring body
-  put (ICDeviceChange mid did odid sn) = do put (3 :: Word16)
-                                            putMessageId mid
-                                            putDeviceId did
-                                            put odid
-                                            putBytestring sn
+    put (ICHelo ver) = do
+        put (1 :: Word16)
+        put (fromIntegral ver :: Word16)
+    put (ICDeliver mid did sn body) = do
+        put (2 :: Word16)
+        putMessageId mid
+        putDeviceId did
+        putBytestring sn
+        putBytestring body
+    put (ICDeviceChange mid did odid sn) = do
+        put (3 :: Word16)
+        putMessageId mid
+        putDeviceId did
+        put odid
+        putBytestring sn
 
-  get = do header <- getWord16be
-           case header of
-              1 -> ICHelo <$> getWordInt
-              2 -> ICDeliver <$> (toASCIIBytes <$> get)
-                             <*> getDeviceId
-                             <*> getByteString'
-                             <*> getByteString'
-              3 -> ICDeviceChange <$> (toASCIIBytes <$> get)
-                                  <*> getDeviceId
-                                  <*> getDeviceId
-                                  <*> getByteString'
+    get = do
+        header <- getWord16be
+        case header of
+            1 -> ICHelo <$> getWordInt
+            2 -> ICDeliver <$> (toASCIIBytes <$> get)
+                           <*> getDeviceId
+                           <*> getByteString'
+                           <*> getByteString'
+            3 -> ICDeviceChange <$> (toASCIIBytes <$> get)
+                                <*> getDeviceId
+                                <*> getDeviceId
+                                <*> getByteString'
+            _ -> fail "Unrecognized header"
 
 instance Binary RelayServerPacket where
-  put (ISHelo ver batch) = do put (1 :: Word16)
-                              put (fromIntegral ver :: Word16)
-                              put (fromIntegral batch :: Word16)
-  put (ISDeliver mid res) = do put (2 :: Word16)
-                               putMessageId mid
-                               put (fromIntegral res :: Word16)
-  put (ISDeviceChange mid res) = do put (3 :: Word16)
-                                    putMessageId mid
-                                    put (fromIntegral res :: Word16)
+    put (ISHelo ver batch) = do
+        put (1 :: Word16)
+        put (fromIntegral ver :: Word16)
+        put (fromIntegral batch :: Word16)
+    put (ISDeliver mid res) = do
+        put (2 :: Word16)
+        putMessageId mid
+        put (fromIntegral res :: Word16)
+    put (ISDeviceChange mid res) = do
+        put (3 :: Word16)
+        putMessageId mid
+        put (fromIntegral res :: Word16)
 
-  get = do header <- getWord16be
-           case header of
+    get = do
+        header <- getWord16be
+        case header of
             1 -> liftM2 ISHelo getWordInt getWordInt
             2 -> liftM2 ISDeliver getUuidAsBytes getWordInt
             3 -> liftM2 ISDeviceChange getUuidAsBytes getWordInt
+            _ -> fail "Unrecognized header"
 
--- I define my own bytestring put as the default one writes the length as a signed
+-- | Custom bytestring put as the default one writes the length as a signed
 -- Int64 which is silly.
 putBytestring :: ByteString -> Put
-putBytestring b = do put (fromIntegral $ B.length b :: Word32)
-                     putByteString b
+putBytestring b = do
+    put (fromIntegral $ B.length b :: Word32)
+    putByteString b
 
 -- And for the other direction
 getByteString' :: Get ByteString
@@ -91,14 +105,15 @@ getByteString' = (fromIntegral <$> getWord32be) >>= getByteString
 
 putMessageId :: ByteString -> Put
 putMessageId mid =
-  case fromASCIIBytes mid of Nothing -> fail "Unable to parse message ID to UUID"
-                             Just uuid -> put uuid
+    case fromASCIIBytes mid of
+        Just uuid -> put uuid
+        Nothing   -> fail "Unable to parse message ID to UUID"
 
 putDeviceId :: ByteString -> Put
 putDeviceId did =
-  case deviceIdToUuid did of
-    Nothing -> fail "Unable to parse deviceId to Cluster/UUID"
-    Just (cid, uuid) -> put cid >> put uuid
+    case deviceIdToUuid did of
+        Just (cid, uuid) -> put cid >> put uuid
+        Nothing          -> fail "Unable to parse deviceId to Cluster/UUID"
 
 getWordInt :: Get Int
 getWordInt = fromIntegral <$> getWord16be
@@ -116,9 +131,10 @@ getDeviceId = do
 -- This split it at the cluster ID, and returns the cluster ID as an int with
 -- the UUID
 deviceIdToUuid :: ByteString -> Maybe (Word16, UUID)
-deviceIdToUuid devid =
-  case uuid of Nothing  -> Nothing
-               Just uid -> Just (cid, uid)
-  where (front, rest) = BC.span (/= '-') devid
-        uuid = fromASCIIBytes $ B.drop 1 rest
-        cid = read (BC.unpack front) :: Word16
+deviceIdToUuid devid = case uuid of
+    Just uid -> Just (cid, uid)
+    Nothing  -> Nothing
+  where
+    (front, rest) = BC.span (/= '-') devid
+    uuid = fromASCIIBytes $ B.drop 1 rest
+    cid = read (BC.unpack front) :: Word16
