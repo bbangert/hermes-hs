@@ -1,4 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Hermes.Protocol.Binary
     (
@@ -6,19 +7,25 @@ module Hermes.Protocol.Binary
       RelayClientPacket (..)
     , RelayServerPacket (..)
 
+      -- * Parsers
+    , relayClientParser
+    , relayServerParser
+
     ) where
 
-import           Control.Applicative   ((<$>), (<*>))
-import           Control.Monad         (liftM2)
-import           Data.Binary           (Binary (..))
-import           Data.Binary.Get       (Get, getByteString, getWord16be,
-                                        getWord32be)
-import           Data.Binary.Put       (Put, putByteString)
-import           Data.ByteString       (ByteString)
-import qualified Data.ByteString       as B
-import qualified Data.ByteString.Char8 as BC
-import           Data.UUID             (UUID, fromASCIIBytes, toASCIIBytes)
-import           Data.Word             (Word16, Word32)
+import           Control.Applicative        ((<$>), (<*>))
+import           Control.Monad              (liftM2)
+import qualified Data.Attoparsec.Binary     as AB
+import qualified Data.Attoparsec.ByteString as A
+import           Data.Binary                (Binary (..))
+import           Data.Binary.Put            (Put, putByteString)
+import           Data.ByteString            (ByteString)
+import qualified Data.ByteString            as B
+import qualified Data.ByteString.Char8      as BC
+import qualified Data.ByteString.Lazy       as BL
+import           Data.UUID                  (UUID, fromASCIIBytes,
+                                             fromByteString, toASCIIBytes)
+import           Data.Word                  (Word16, Word32)
 
 type Body = ByteString
 type DeviceId = ByteString
@@ -55,20 +62,7 @@ instance Binary RelayClientPacket where
         putDeviceId did
         put odid
         putBytestring sn
-
-    get = do
-        header <- getWord16be
-        case header of
-            1 -> ICHelo <$> getWordInt
-            2 -> ICDeliver <$> (toASCIIBytes <$> get)
-                           <*> getDeviceId
-                           <*> getByteString'
-                           <*> getByteString'
-            3 -> ICDeviceChange <$> (toASCIIBytes <$> get)
-                                <*> getDeviceId
-                                <*> getDeviceId
-                                <*> getByteString'
-            _ -> fail "Unrecognized header"
+    get = fail "No binary parser"
 
 instance Binary RelayServerPacket where
     put (ISHelo ver batch) = do
@@ -83,14 +77,51 @@ instance Binary RelayServerPacket where
         put (3 :: Word16)
         putMessageId mid
         put (fromIntegral res :: Word16)
+    get = fail "No binary parser"
 
-    get = do
-        header <- getWord16be
-        case header of
-            1 -> liftM2 ISHelo getWordInt getWordInt
-            2 -> liftM2 ISDeliver getUuidAsBytes getWordInt
-            3 -> liftM2 ISDeviceChange getUuidAsBytes getWordInt
-            _ -> fail "Unrecognized header"
+relayClientParser :: A.Parser RelayClientPacket
+relayClientParser = do
+    header <- AB.anyWord16be
+    case header of
+        1 -> AB.anyWord16be >>= return . ICHelo . fromIntegral
+        2 -> ICDeliver <$> parseUuid
+                       <*> parseCsUuid
+                       <*> parseByteString
+                       <*> parseByteString
+        3 -> ICDeviceChange <$> parseUuid
+                            <*> parseCsUuid
+                            <*> parseCsUuid
+                            <*> parseByteString
+        _ -> fail "Invalid header"
+
+relayServerParser :: A.Parser RelayServerPacket
+relayServerParser = do
+    header <- AB.anyWord16be
+    case header of
+        1 -> liftM2 ISHelo parseNum parseNum
+        2 -> liftM2 ISDeliver (A.take 16) parseNum
+        3 -> liftM2 ISDeviceChange (A.take 16) parseNum
+        _ -> fail "Unrecognized header"
+
+parseNum :: Num a => A.Parser a
+parseNum = fromIntegral <$> AB.anyWord16be
+
+parseByteString :: A.Parser ByteString
+parseByteString = AB.anyWord32be >>= A.take . fromIntegral
+
+-- | Parse a UUID from its network bytes into hex bytes
+parseUuid :: A.Parser ByteString
+parseUuid = do
+    uuid <- fromByteString . BL.pack . B.unpack  <$> A.take 16
+    case uuid of
+        Just x -> return $ toASCIIBytes x
+        Nothing -> fail "Unable to read UUID bytes"
+
+parseCsUuid :: A.Parser ByteString
+parseCsUuid = do
+    (cs :: Int) <- parseNum
+    uuid <- parseUuid
+    return $ B.concat [BC.pack (show cs), "-", uuid]
 
 -- | Custom bytestring put as the default one writes the length as a signed
 -- Int64 which is silly.
@@ -98,10 +129,6 @@ putBytestring :: ByteString -> Put
 putBytestring b = do
     put (fromIntegral $ B.length b :: Word32)
     putByteString b
-
--- And for the other direction
-getByteString' :: Get ByteString
-getByteString' = (fromIntegral <$> getWord32be) >>= getByteString
 
 putMessageId :: ByteString -> Put
 putMessageId mid =
@@ -114,18 +141,6 @@ putDeviceId did =
     case deviceIdToUuid did of
         Just (cid, uuid) -> put cid >> put uuid
         Nothing          -> fail "Unable to parse deviceId to Cluster/UUID"
-
-getWordInt :: Get Int
-getWordInt = fromIntegral <$> getWord16be
-
-getUuidAsBytes :: Get ByteString
-getUuidAsBytes = toASCIIBytes <$> get
-
-getDeviceId :: Get ByteString
-getDeviceId = do
-  cid <- BC.pack . show <$> getWord16be
-  uuid <- get
-  return $ B.concat [cid, "-", toASCIIBytes uuid]
 
 -- A device ID is cluster ID int with '-' joining to a hex uuid
 -- This split it at the cluster ID, and returns the cluster ID as an int with

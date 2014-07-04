@@ -18,14 +18,15 @@ Library
     Hermes.Protocol.Websocket
   Other-Modules:
   Build-Depends:
-      base        >= 4        && < 5
-    , attoparsec  >= 0.12.1.0
-    , binary      >= 0.7.2.1
-    , byteable    >= 0.1.1
-    , bytestring  >= 0.10.4.0
-    , cryptohash  >= 0.11.5
-    , text        >= 1.1
-    , uuid        >= 1.3.3
+      base              >= 4        && < 5
+    , attoparsec        >= 0.12.1.0
+    , attoparsec-binary >=0.2
+    , binary            >= 0.7.2.1
+    , byteable          >= 0.1.1
+    , bytestring        >= 0.10.4.0
+    , cryptohash        >= 0.11.5
+    , text              >= 1.1
+    , uuid              >= 1.3.3
 
 Executable cn
   Default-Language:     Haskell2010
@@ -33,17 +34,21 @@ Executable cn
   Main-is:              Main.hs
   GHC-Options:          -Wall -Werror -threaded
   Other-Modules:
+    Hermes.ConnectionNode.RelayClient
     Hermes.ConnectionNode.Types
     Hermes.ConnectionNode.WebSocketServer
   Build-depends:
       base            >= 4.6      && < 5
     , attoparsec      >= 0.12.1.0
+    , binary          >= 0.7.2.1
     , bytestring      >= 0.10.4.0
     , containers      >= 0.5
     , file-embed      >= 0.0.7
     , hermes          >= 0.1
     , io-streams
     , http-types
+    , network         >= 2.5.0
+    , unix            >= 2.7
     , monad-loops     >= 0.4.2.1
     , time
     , transformers    >= 0.3

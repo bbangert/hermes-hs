@@ -197,7 +197,7 @@ checkAuth state h ping conn = do
 
   where
     process (Right NewAuth) cdata = do
-        deviceID <- W.newDeviceID
+        deviceID <- W.newDeviceID (clusterId state)
         atomically $ addClient deviceID cdata state
         safeCleanup state deviceID $ do
             WS.sendTextData conn $ B.concat ["AUTH:NEW:", deviceID, ":",

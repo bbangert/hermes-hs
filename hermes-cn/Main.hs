@@ -8,6 +8,7 @@ import           Control.Monad                         (forever)
 import           Control.Monad.STM                     (atomically)
 import qualified Network.Wai.Handler.Warp.Timeout      as WT
 
+import           Hermes.ConnectionNode.RelayClient     (connectRelayClient)
 import           Hermes.ConnectionNode.Types           (ServerState,
                                                         newServerState,
                                                         numClients)
@@ -22,6 +23,7 @@ echoStats state = forever $ do
 main :: IO ()
 main = do
     manager <- WT.initialize 1000000
-    state <- atomically $ newServerState manager
+    state <- atomically $ newServerState manager 1
     _ <- forkIO $ echoStats state
     webSocketServer 8080 state
+    connectRelayClient "localhost" 2000 state

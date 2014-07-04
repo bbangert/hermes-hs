@@ -12,6 +12,8 @@ module Hermes.ConnectionNode.Types
     , addClient
     , getClient
     , removeClient
+    , addRelay
+    , removeRelay
 
       -- * InboundRelay
     , InboundRelay (..)
@@ -57,6 +59,7 @@ data ServerState = ServerState
     , relays    :: !(TVar [InboundRelay])
     , routers   :: !(TVar [OutboundRouter])
     , toManager :: !WT.Manager
+    , clusterId :: !Int
     }
 
 data CNException = DuplicateClient
@@ -68,12 +71,13 @@ instance Exception CNException
 
 -- | Create a new ServerState. An existing timeout manager must be passed in.
 newServerState :: WT.Manager        -- ^ Client read timeout manager
+               -> Int               -- ^ Cluster Id
                -> STM ServerState   -- ^ Initialized ServerState
-newServerState manager = do
+newServerState manager cid = do
     cm <- newTVar M.empty
     inbrs <- newTVar []
     ors <- newTVar []
-    return $ ServerState cm inbrs ors manager
+    return $ ServerState cm inbrs ors manager cid
 
 -- | Read the client map out of the ServerState.
 readClientMap :: ServerState -> STM ClientMap
@@ -99,3 +103,11 @@ removeClient deviceId state = modifyTVar' (clientMap state) $ M.delete deviceId
 -- | Get the ClientData for a given DeviceID from the ServerState.
 getClient :: DeviceID -> ServerState -> STM (Maybe ClientData)
 getClient deviceId state = M.lookup deviceId <$> readClientMap state
+
+-- | Add an InboundRelay to the ServerState.
+addRelay :: InboundRelay -> ServerState -> STM ()
+addRelay inbr state = modifyTVar' (relays state) (inbr:)
+
+removeRelay :: InboundRelay -> ServerState -> STM ()
+removeRelay inbr state = modifyTVar' (relays state) $ filter ((==myId) . inThreadId)
+  where myId = inThreadId inbr

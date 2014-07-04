@@ -19,7 +19,6 @@ module Hermes.Protocol.Websocket
     ) where
 
 import           Control.Applicative              ((*>))
-import           Control.Monad                    (liftM)
 import           Crypto.Hash                      (SHA256,
                                                    digestToHexByteString)
 import           Crypto.MAC                       (HMAC (hmacGetDigest), hmac)
@@ -30,6 +29,8 @@ import qualified Data.Attoparsec.ByteString.Char8 as AC
 import           Data.Attoparsec.Combinator       (choice)
 import           Data.Byteable                    (constEqBytes)
 import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString                  as B
+import qualified Data.ByteString.Char8            as BC
 import           Data.UUID                        (toASCIIBytes)
 import           Data.UUID.V4                     (nextRandom)
 
@@ -112,8 +113,10 @@ verifyAuth secret (ExistingAuth deviceId key) = compareHmac secret key deviceId
 verifyAuth secret (DeviceChange _ deviceId key _) = compareHmac secret key deviceId
 verifyAuth _ _ = False
 
-newDeviceID :: IO DeviceID
-newDeviceID = liftM toASCIIBytes nextRandom
+newDeviceID :: Int -> IO DeviceID
+newDeviceID cid = do
+    uuid <- nextRandom
+    return $ B.concat [BC.pack (show cid), "-", toASCIIBytes uuid]
 
 signDeviceID :: DeviceID -> ByteString -> ByteString
 signDeviceID uuid secret =
