@@ -7,6 +7,8 @@ module Hermes.ConnectionNode.WebSocketServer
       -- * Websocket Server
       webSocketServer
 
+    , nackDeviceMessage
+
     ) where
 
 import           Control.Applicative              ((<$>), (<*))
